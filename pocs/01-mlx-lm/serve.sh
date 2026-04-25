@@ -9,4 +9,4 @@ exec mlx_lm.server \
   --port 8080 \
   --log-level INFO \
   --chat-template-args '{"enable_thinking": false}' \
-  --max-tokens 4096
+  --max-tokens 16384
