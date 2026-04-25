@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# pi-local — wrapper that ensures mlx-lm is running, then runs pi.
+#
+# - If the local mlx-lm endpoint is already healthy, runs pi immediately.
+# - If not, starts the server (~5-10s model load) and waits before running pi.
+# - Server stays up after this command exits — use `mlxlm-stop` to free RAM.
+#
+# This is a separate command from `pi` so you can still call `pi` directly
+# (e.g. `pi --provider anthropic`) without forcing a local-server startup.
+#
+# Add to your shell rc if you want this to be the default:
+#   alias pi=pi-local
+
+set -uo pipefail
+
+# Resolve our invocation dir (used to find sibling helpers) and our real-file dir
+# (so installed symlinks at e.g. ~/.local/bin still find the repo's bin/).
+INVOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+REAL_DIR="$(cd "$(dirname "$SELF_PATH")" && pwd)"
+HEALTH_URL="http://127.0.0.1:8080/v1/models"
+
+# Locate the real pi binary, skipping anything in our own dirs (avoids
+# self-recursion if the user has aliased or symlinked pi -> pi-local).
+REAL_PI=""
+IFS=":" read -ra paths <<<"$PATH"
+for d in "${paths[@]}"; do
+  [ -x "$d/pi" ] || continue
+  cand_dir="$(cd "$d" && pwd)"
+  [ "$cand_dir" = "$INVOKE_DIR" ] && continue
+  [ "$cand_dir" = "$REAL_DIR" ] && continue
+  REAL_PI="$d/pi"
+  break
+done
+if [ -z "$REAL_PI" ]; then
+  echo "pi-local: cannot find real 'pi' binary on PATH (excluding $INVOKE_DIR, $REAL_DIR)" >&2
+  exit 127
+fi
+
+# Health check; start server if needed (mlxlm-start lives next to us in the repo).
+if ! curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
+  echo "pi-local: mlx-lm not responding — starting it…" >&2
+  "$REAL_DIR/mlxlm-start" >&2 || exit 1
+fi
+
+exec "$REAL_PI" "$@"

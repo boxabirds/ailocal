@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# mlxlm-stop — stop a running mlx-lm server (frees ~33 GB of unified memory).
+#
+# Tries the recorded PID file first, falls back to lsof on port 8080.
+set -uo pipefail
+
+PID_FILE="$HOME/.pi/mlxlm.pid"
+PORT=8080
+killed=0
+
+if [ -f "$PID_FILE" ]; then
+  PID=$(cat "$PID_FILE")
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    echo "Stopping PID $PID (from $PID_FILE)…"
+    kill "$PID"
+    killed=1
+  fi
+  rm -f "$PID_FILE"
+fi
+
+# Belt-and-braces: anything still on port 8080
+LSOF_PIDS=$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null || true)
+if [ -n "$LSOF_PIDS" ]; then
+  echo "Stopping process(es) on port $PORT: $LSOF_PIDS"
+  echo "$LSOF_PIDS" | xargs -r kill
+  killed=1
+fi
+
+if [ "$killed" = "1" ]; then
+  sleep 1
+  echo "Stopped."
+else
+  echo "No mlx-lm server found running."
+fi

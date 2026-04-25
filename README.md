@@ -24,20 +24,68 @@ mlx-lm wins despite having **no** speculative-decoding layer. DFlash's ~3.4× sh
 
 Full breakdown and gotchas: **[pocs/README.md](pocs/README.md)**.
 
-## Quick start
+## Quick start — three ways to run it
+
+`install.sh` always sets up uv + the model + mlx-lm + pi config. The `--auto-start` flag picks how the server lifecycle works. Pick the one that matches how you'll actually use it:
+
+### A. Manual (default) — only running when you say so
 
 ```bash
-# 1. Install everything (idempotent — safe to re-run)
 ./install.sh
-
-# 2. Start the server (long-running)
-./pocs/01-mlx-lm/serve.sh
-
-# 3. In another shell, run the bench
-./bench.sh
+./pocs/01-mlx-lm/serve.sh   # in its own terminal — Ctrl-C to stop
+pi -p "write hello world in rust"   # in another terminal
 ```
 
-The installer handles: prereq checks (Apple Silicon, RAM, disk, Xcode CLT), `uv` install, HuggingFace auth verification, model download, mlx-lm setup, and pi.dev wiring. Re-running it is safe; each step is gated by a check.
+You explicitly start and stop. ~33 GB only held while `serve.sh` is running.
+
+### B. Wrapper — `pi-local` starts the server on demand
+
+```bash
+./install.sh --auto-start wrapper
+# Adds to ~/.local/bin: pi-local, mlxlm-start, mlxlm-stop
+```
+
+Then from any directory:
+
+```bash
+pi-local -p "explain this codebase"
+# First call: spawns mlx-lm in the background (~5-10 s model load), then runs pi.
+# Subsequent calls: instant — server is already up.
+
+mlxlm-stop                          # frees the ~33 GB when you're done
+```
+
+The server keeps running between `pi-local` calls (so you don't pay model-load latency every time) but **does not** auto-stop. You're in charge of `mlxlm-stop`. Closing the terminal does not kill the server (`nohup`'d).
+
+Optional: `alias pi=pi-local` in your shell rc and plain `pi` becomes auto-start too.
+
+This is the right mode if `pi` use is bursty and you don't want a 33 GB resident process between sessions.
+
+### C. launchd — server is always running on login
+
+```bash
+./install.sh --auto-start launchd
+# Writes ~/Library/LaunchAgents/com.ailocal.mlxlm.plist and loads it.
+# RunAtLoad + KeepAlive: starts at login, restarts if it crashes.
+```
+
+```bash
+pi -p "..."   # always works, no warmup, no wrapper
+```
+
+Lifecycle:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.ailocal.mlxlm.plist   # stop, frees RAM
+launchctl load   ~/Library/LaunchAgents/com.ailocal.mlxlm.plist   # start again
+# logs: ~/Library/Logs/mlxlm.{out,err}.log
+```
+
+This is the right mode if you use pi every day and the 33 GB resident cost is fine.
+
+### What the installer does (any mode)
+
+prereq checks (Apple Silicon, RAM ≥ 32 GB, disk ≥ 50 GB free, Xcode CLT) → `uv` → HuggingFace token + scope verify → download `unsloth/Qwen3.6-27B-MLX-8bit` (~33 GB, resumable) → uv venv with `mlx-lm` → write `~/.pi/agent/{models,settings}.json` → optional smoke test. Idempotent.
 
 ## Reference results — M5 Max 128 GB, macOS 26.4, mlx-lm 0.31.3
 
@@ -68,8 +116,12 @@ The installer handles: prereq checks (Apple Silicon, RAM, disk, Xcode CLT), `uv`
 ```
 ailocal/
 ├── README.md          # this file
-├── install.sh         # Phase 2 — resilient one-shot installer
+├── install.sh         # resilient one-shot installer
 ├── bench.sh           # 3-test agent-loop bench with consistent tok/s
+├── bin/               # symlink targets used by --auto-start wrapper/launchd
+│   ├── mlxlm-start    # spawn the mlx-lm server (idempotent)
+│   ├── mlxlm-stop     # kill the running server
+│   └── pi-local       # `pi` wrapper that auto-starts the server first
 ├── pocs/              # head-to-head bench of 4 server stacks
 │   ├── README.md
 │   ├── eval/          # shared eval harness (prompts.json, run_eval.sh, configure_pi.sh)
@@ -80,7 +132,18 @@ ailocal/
 └── CLAUDE.md          # collected hard-won notes for future Claude sessions
 ```
 
+## Honest caveat on speed
+
+**~14.6 tok/s is not fast.** Frontier APIs (Claude/GPT) are 5-10× faster on the same prompts. If you bench heavily and the latency annoys you, this stack isn't going to win you back. What it does win:
+
+- Zero per-token cost.
+- Zero rate limits.
+- Code never leaves your machine.
+- Works offline (after the model is cached).
+
+If you're just trying it out: use **wrapper mode**, run `mlxlm-stop` when you're done, and decide later whether it's worth keeping the LaunchAgent loaded.
+
 ## Status
 
 - Phase 1 (POCs): complete — see [pocs/README.md](pocs/README.md).
-- Phase 2 (installer + bench): in progress.
+- Phase 2 (installer + bench + auto-start): complete.

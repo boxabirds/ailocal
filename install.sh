@@ -13,7 +13,17 @@
 #   - pi.dev (npm install -g if missing) and writes ~/.pi/agent/models.json
 #   - Smoke test: starts the server, hits /v1/models, kills server
 #
-# Usage: ./install.sh [--skip-model] [--skip-smoke]
+# Usage: ./install.sh [--skip-model] [--skip-smoke] [--auto-start MODE]
+#
+# --auto-start MODE controls how mlx-lm starts up:
+#   none     (default) — you start it yourself: ./pocs/01-mlx-lm/serve.sh
+#   wrapper            — installs `pi-local` (and `mlxlm-start`/`mlxlm-stop`)
+#                         into ~/.local/bin. `pi-local` starts the server on
+#                         demand if it isn't running, then runs pi normally.
+#                         You shut it down with `mlxlm-stop`.
+#   launchd            — installs ~/Library/LaunchAgents/com.ailocal.mlxlm.plist
+#                         and loads it. Server starts at login, restarts on
+#                         crash, and holds ~33 GB until you `launchctl unload`.
 
 set -uo pipefail
 
@@ -29,6 +39,9 @@ readonly MIN_FREE_DISK_GB=50
 readonly REQUIRED_MACOS_MAJOR=15
 readonly MLX_LM_PORT=8080
 readonly PI_CONFIG_DIR="$HOME/.pi/agent"
+readonly USER_BIN_DIR="$HOME/.local/bin"
+readonly LAUNCH_AGENT_LABEL="com.ailocal.mlxlm"
+readonly LAUNCH_AGENT_PLIST="$HOME/Library/LaunchAgents/${LAUNCH_AGENT_LABEL}.plist"
 
 # ---------- Output helpers ----------
 if [ -t 1 ]; then
@@ -46,15 +59,25 @@ note()  { printf "%s   %s%s\n" "$C_DIM" "$1" "$C_RST"; }
 # ---------- Args ----------
 SKIP_MODEL=0
 SKIP_SMOKE=0
-for arg in "$@"; do
+AUTO_START="none"
+i=1
+while [ $i -le $# ]; do
+  arg="${!i}"
   case "$arg" in
     --skip-model) SKIP_MODEL=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
+    --auto-start)
+      i=$((i+1)); AUTO_START="${!i:-}"
+      case "$AUTO_START" in
+        none|wrapper|launchd) ;;
+        *) fail "--auto-start must be one of: none, wrapper, launchd (got: $AUTO_START)" ;;
+      esac ;;
     -h|--help)
-      sed -n '2,18p' "$0"
+      sed -n '2,28p' "$0"
       exit 0 ;;
     *) fail "unknown arg: $arg" ;;
   esac
+  i=$((i+1))
 done
 
 # ---------- 1. Prereq checks ----------
@@ -193,7 +216,62 @@ mkdir -p "$PI_CONFIG_DIR"
   "$MODEL_LOCAL_DIR" >/dev/null
 ok "pi.dev configured (provider=mlxlm, baseUrl=http://127.0.0.1:${MLX_LM_PORT}/v1)"
 
-# ---------- 7. Smoke test ----------
+# ---------- 7. Auto-start (optional) ----------
+step "Configuring auto-start mode: $AUTO_START"
+case "$AUTO_START" in
+  none)
+    note "Manual mode — start with ./pocs/01-mlx-lm/serve.sh, stop with Ctrl-C."
+    ;;
+  wrapper)
+    mkdir -p "$USER_BIN_DIR"
+    for cmd in mlxlm-start mlxlm-stop pi-local; do
+      ln -sf "$REPO_ROOT/bin/$cmd" "$USER_BIN_DIR/$cmd"
+    done
+    ok "Installed mlxlm-start, mlxlm-stop, pi-local into $USER_BIN_DIR"
+    case ":$PATH:" in
+      *":$USER_BIN_DIR:"*) : ;;
+      *) warn "$USER_BIN_DIR is not on your PATH"
+         note "Add to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    esac
+    note "Run 'pi-local …' to use pi against Qwen3.6 (auto-starts server on first call)."
+    note "Run 'mlxlm-stop' to free the ~33 GB when you're done."
+    ;;
+  launchd)
+    mkdir -p "$USER_BIN_DIR" "$(dirname "$LAUNCH_AGENT_PLIST")"
+    for cmd in mlxlm-start mlxlm-stop pi-local; do
+      ln -sf "$REPO_ROOT/bin/$cmd" "$USER_BIN_DIR/$cmd"
+    done
+    cat >"$LAUNCH_AGENT_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LAUNCH_AGENT_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${REPO_ROOT}/bin/mlxlm-start</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>MLXLM_FOREGROUND</key><string>1</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${HOME}/Library/Logs/mlxlm.out.log</string>
+  <key>StandardErrorPath</key><string>${HOME}/Library/Logs/mlxlm.err.log</string>
+</dict>
+</plist>
+EOF
+    # Reload if already loaded
+    launchctl unload "$LAUNCH_AGENT_PLIST" 2>/dev/null || true
+    launchctl load "$LAUNCH_AGENT_PLIST" || fail "launchctl load failed"
+    ok "LaunchAgent loaded: $LAUNCH_AGENT_LABEL"
+    note "Server will start at login and on every reboot. ~33 GB held until unloaded."
+    note "Stop:    launchctl unload $LAUNCH_AGENT_PLIST"
+    note "Restart: launchctl unload \$1 && launchctl load \$1   (where \$1 is the plist path)"
+    note "Logs:    ~/Library/Logs/mlxlm.{out,err}.log"
+    ;;
+esac
+
+# ---------- 8. Smoke test ----------
 if [ "$SKIP_SMOKE" = "1" ]; then
   warn "Skipping smoke test (--skip-smoke)"
 else
@@ -228,14 +306,45 @@ fi
 cat <<EOF
 
 ${C_GRN}Install complete.${C_RST}
-
-Next steps:
-  1. Start the server (long-running):
-     ${C_DIM}\$${C_RST} ./pocs/01-mlx-lm/serve.sh
-
-  2. In another shell, run the bench:
-     ${C_DIM}\$${C_RST} ./bench.sh
-
-  3. Or just use pi normally — it's already wired up:
-     ${C_DIM}\$${C_RST} pi -p "write a hello world in rust"
 EOF
+case "$AUTO_START" in
+  none) cat <<EOF
+
+To use it (manual mode):
+  1. Start the server (in its own shell — leave running):
+     ${C_DIM}\$${C_RST} ./pocs/01-mlx-lm/serve.sh
+  2. In any other shell:
+     ${C_DIM}\$${C_RST} pi -p "write hello world in rust"
+  3. Stop the server: Ctrl-C in the serve.sh shell. ~33 GB freed.
+
+  Run the bench: ${C_DIM}\$${C_RST} ./bench.sh
+EOF
+  ;;
+  wrapper) cat <<EOF
+
+To use it (wrapper mode):
+  ${C_DIM}\$${C_RST} pi-local -p "write hello world in rust"
+        — auto-starts the server on first use (model loads ~5-10s)
+        — server keeps running after pi-local returns
+        — ${C_DIM}\$${C_RST} mlxlm-stop  → kills the server, frees ~33 GB
+
+  Optional: ${C_DIM}\$${C_RST} echo 'alias pi=pi-local' >> ~/.zshrc   (or ~/.bashrc)
+            then plain ${C_DIM}\`pi\`${C_RST} also auto-starts the server.
+
+  Run the bench: ${C_DIM}\$${C_RST} ./bench.sh   (server must be up; \`pi-local --version\` will start it)
+EOF
+  ;;
+  launchd) cat <<EOF
+
+To use it (launchd mode — server is already running):
+  ${C_DIM}\$${C_RST} pi -p "write hello world in rust"
+
+  Stop:    ${C_DIM}\$${C_RST} launchctl unload $LAUNCH_AGENT_PLIST
+  Restart: ${C_DIM}\$${C_RST} launchctl unload $LAUNCH_AGENT_PLIST && launchctl load $LAUNCH_AGENT_PLIST
+  Logs:    ~/Library/Logs/mlxlm.{out,err}.log
+  Memory:  ~33 GB held continuously until you unload.
+
+  Run the bench: ${C_DIM}\$${C_RST} ./bench.sh
+EOF
+  ;;
+esac

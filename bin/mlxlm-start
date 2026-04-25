@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# mlxlm-start — start the mlx-lm server in the background if it isn't already.
+# Idempotent: returns 0 quickly if the server is already healthy.
+#
+# When run interactively, prints the PID and tails the log path.
+# When run by launchd, exec's serve.sh in the foreground (so launchd manages it).
+
+set -uo pipefail
+
+# Discover repo root from this script's location, following symlinks
+# (so ~/.local/bin/mlxlm-start -> <repo>/bin/mlxlm-start works correctly).
+SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+SELF_DIR="$(cd "$(dirname "$SELF_PATH")" && pwd)"
+REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+SERVE_SCRIPT="$REPO_ROOT/pocs/01-mlx-lm/serve.sh"
+LOG_FILE="$HOME/Library/Logs/mlxlm.log"
+PID_FILE="$HOME/.pi/mlxlm.pid"
+HEALTH_URL="http://127.0.0.1:8080/v1/models"
+WAIT_SECS=60
+
+# Foreground mode for launchd: just exec serve.sh
+if [ "${MLXLM_FOREGROUND:-0}" = "1" ]; then
+  exec "$SERVE_SCRIPT"
+fi
+
+mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+
+# Already running?
+if curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
+  echo "mlx-lm already running (health check OK at $HEALTH_URL)"
+  exit 0
+fi
+
+echo "Starting mlx-lm — model loads ~33 GB, takes ~5-10s..."
+nohup "$SERVE_SCRIPT" >>"$LOG_FILE" 2>&1 &
+PID=$!
+echo "$PID" > "$PID_FILE"
+disown "$PID" 2>/dev/null || true
+
+# Wait for /v1/models
+for i in $(seq 1 "$WAIT_SECS"); do
+  if curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
+    echo "Ready (PID $PID, log: $LOG_FILE)"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "ERROR: mlx-lm did not become healthy within ${WAIT_SECS}s." >&2
+echo "Last 20 log lines from $LOG_FILE:" >&2
+tail -20 "$LOG_FILE" >&2
+exit 1
