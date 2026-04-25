@@ -52,25 +52,36 @@ Then from any directory:
 pi-local -p "explain this codebase"
 # First call:        spawns mlx-lm + idle-watcher (~5-10 s model load), then runs pi.
 # Subsequent calls:  instant — server is already up.
-# After 5 min idle:  watcher polls the access log and kills the server automatically.
-# Next call:         restarts everything from scratch.
 
+# After you stop using pi:
+#   - watcher polls every 30 s
+#   - skipped while any pi process is alive (REPL still open, long-running call, etc.)
+#   - once no pi is running AND the access log has been idle for 5 min, server is killed
 mlxlm-stop                          # explicit stop — also clears the watcher
 ```
 
-How the idle-stop works: the watcher polls every 30 s, compares the mlx-lm log file's mtime to "now". Every HTTP request mlx-lm handles writes a line to the log, so the mtime is exactly the last-request timestamp. After `MLXLM_IDLE_SECONDS` of staleness, the watcher kills the server and exits. There's no per-call timer — only one watcher per server, and a long-running interactive `pi-local` REPL keeps the server alive as long as it makes API calls.
+**How the idle-stop decides:** every 30 s, the watcher asks two questions in order:
 
-Tune it:
+1. **Is any pi process running?** (`pgrep -x pi`). pi.dev's launcher uses `#!/usr/bin/env node`, which makes the kernel set `argv[0]` to `pi`, so `pgrep -x pi` finds it cleanly. If yes → skip kill, don't even check the log.
+2. **Has the access log been quiet for `MLXLM_IDLE_SECONDS`?** (file mtime gap; every HTTP request mlx-lm handles writes a line). If yes → kill the server.
+
+This means a long-running `pi` REPL where you're typing/reading (zero API calls for 10 min) does **not** trigger a kill — the server only goes away after pi exits *and* nothing has hit the API for the configured window.
+
+**Failure modes are self-healing.** No cooperative state to leak: `pgrep` is a live OS snapshot, log mtime is filesystem-managed, the watcher pid file is `kill -0`-verified before any spawn. If pi crashes, the watcher just stops finding it on the next poll. If the watcher dies, the next `pi-local` call spawns a new one.
+
+**Tune it:**
 
 ```bash
 ./install.sh --auto-start wrapper --idle-stop-minutes 15   # change at install
 echo MLXLM_IDLE_SECONDS=900 > ~/.pi/ailocal.conf            # or edit afterwards
-./install.sh --auto-start wrapper --idle-stop-minutes 0    # disable entirely
+./install.sh --auto-start wrapper --idle-stop-minutes 0    # disable entirely (manual stop only)
 ```
 
 Optional: `alias pi=pi-local` in your shell rc and plain `pi` becomes auto-start too.
 
 This is the right mode if `pi` use is bursty and you don't want a 33 GB resident process between sessions.
+
+> Caveat: the `pgrep -x pi` gate matches anything whose `argv[0]` is literally `pi`. If you have an unrelated binary on your machine called `pi` (rare), the watcher will treat it as a live pi.dev session and refuse to shut the server down.
 
 ### C. launchd — server is always running on login
 
