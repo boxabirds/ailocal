@@ -26,22 +26,12 @@ Full breakdown and gotchas: **[pocs/README.md](pocs/README.md)**.
 
 ## Quick start — three ways to run it
 
-`install.sh` always sets up uv + the model + mlx-lm + pi config. The `--auto-start` flag picks how the server lifecycle works. Pick the one that matches how you'll actually use it:
+`install.sh` always sets up uv + the model + mlx-lm + pi config. The `--auto-start` flag picks how the server lifecycle works.
 
-### A. Manual (default) — only running when you say so
+### A. Wrapper (default) — `pi-local` starts on demand, idle-stops after 5 min
 
 ```bash
 ./install.sh
-./pocs/01-mlx-lm/serve.sh   # in its own terminal — Ctrl-C to stop
-pi -p "write hello world in rust"   # in another terminal
-```
-
-You explicitly start and stop. ~33 GB only held while `serve.sh` is running.
-
-### B. Wrapper — `pi-local` starts on demand, idle-stops after 5 min
-
-```bash
-./install.sh --auto-start wrapper
 # Adds to ~/.local/bin: pi-local, mlxlm-start, mlxlm-stop, mlxlm-idle-watcher
 # Writes ~/.pi/ailocal.conf with MLXLM_IDLE_SECONDS=300
 ```
@@ -72,9 +62,9 @@ This means a long-running `pi` REPL where you're typing/reading (zero API calls 
 **Tune it:**
 
 ```bash
-./install.sh --auto-start wrapper --idle-stop-minutes 15   # change at install
-echo MLXLM_IDLE_SECONDS=900 > ~/.pi/ailocal.conf            # or edit afterwards
-./install.sh --auto-start wrapper --idle-stop-minutes 0    # disable entirely (manual stop only)
+./install.sh --idle-stop-minutes 15                        # change at install
+echo MLXLM_IDLE_SECONDS=900 > ~/.pi/ailocal.conf           # or edit afterwards
+./install.sh --idle-stop-minutes 0                         # disable entirely (manual stop only)
 ```
 
 Optional: `alias pi=pi-local` in your shell rc and plain `pi` becomes auto-start too.
@@ -82,6 +72,16 @@ Optional: `alias pi=pi-local` in your shell rc and plain `pi` becomes auto-start
 This is the right mode if `pi` use is bursty and you don't want a 33 GB resident process between sessions.
 
 > Caveat: the `pgrep -x pi` gate matches anything whose `argv[0]` is literally `pi`. If you have an unrelated binary on your machine called `pi` (rare), the watcher will treat it as a live pi.dev session and refuse to shut the server down.
+
+### B. Manual — only running when you say so
+
+```bash
+./install.sh --auto-start none
+./pocs/01-mlx-lm/serve.sh   # in its own terminal — Ctrl-C to stop
+pi -p "write hello world in rust"   # in another terminal
+```
+
+You explicitly start and stop. ~33 GB only held while `serve.sh` is running. No helper scripts get added to `~/.local/bin`. Pick this if you don't want anything daemon-shaped on your system.
 
 ### C. launchd — server is always running on login
 

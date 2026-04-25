@@ -17,13 +17,13 @@
 #                     [--idle-stop-minutes N]
 #
 # --auto-start MODE controls how mlx-lm starts up:
-#   none     (default) — you start it yourself: ./pocs/01-mlx-lm/serve.sh
-#   wrapper            — installs `pi-local` (and `mlxlm-start`/`mlxlm-stop`)
+#   wrapper  (default) — installs `pi-local` (and `mlxlm-start`/`mlxlm-stop`)
 #                         into ~/.local/bin. `pi-local` starts the server on
 #                         demand if it isn't running, then runs pi normally.
 #                         An idle-stop watcher kills the server after N minutes
 #                         of no requests (default 5; --idle-stop-minutes 0 to
 #                         disable). You can also stop manually: `mlxlm-stop`.
+#   none               — you start it yourself: ./pocs/01-mlx-lm/serve.sh
 #   launchd            — installs ~/Library/LaunchAgents/com.ailocal.mlxlm.plist
 #                         and loads it. Server starts at login, restarts on
 #                         crash, and holds ~33 GB until you `launchctl unload`.
@@ -67,7 +67,7 @@ note()  { printf "%s   %s%s\n" "$C_DIM" "$1" "$C_RST"; }
 # ---------- Args ----------
 SKIP_MODEL=0
 SKIP_SMOKE=0
-AUTO_START="none"
+AUTO_START="wrapper"
 IDLE_STOP_MINUTES=5
 i=1
 while [ $i -le $# ]; do
