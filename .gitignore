@@ -15,9 +15,10 @@ bench/results/
 # Vendored upstream sources (cloned by install scripts)
 pocs/02-vllm-swift/src/
 
-# Editor
+# Editor / agent state
 .vscode/
 .idea/
+.claude/
 
 # Local secrets / scratch
 /tmp_*
