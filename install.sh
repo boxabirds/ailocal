@@ -14,16 +14,24 @@
 #   - Smoke test: starts the server, hits /v1/models, kills server
 #
 # Usage: ./install.sh [--skip-model] [--skip-smoke] [--auto-start MODE]
+#                     [--idle-stop-minutes N]
 #
 # --auto-start MODE controls how mlx-lm starts up:
 #   none     (default) — you start it yourself: ./pocs/01-mlx-lm/serve.sh
 #   wrapper            — installs `pi-local` (and `mlxlm-start`/`mlxlm-stop`)
 #                         into ~/.local/bin. `pi-local` starts the server on
 #                         demand if it isn't running, then runs pi normally.
-#                         You shut it down with `mlxlm-stop`.
+#                         An idle-stop watcher kills the server after N minutes
+#                         of no requests (default 5; --idle-stop-minutes 0 to
+#                         disable). You can also stop manually: `mlxlm-stop`.
 #   launchd            — installs ~/Library/LaunchAgents/com.ailocal.mlxlm.plist
 #                         and loads it. Server starts at login, restarts on
 #                         crash, and holds ~33 GB until you `launchctl unload`.
+#                         Idle-stop is disabled here (would conflict with
+#                         KeepAlive).
+#
+# --idle-stop-minutes N
+#   Wrapper-mode only. Default 5. Set to 0 to disable.
 
 set -uo pipefail
 
@@ -60,6 +68,7 @@ note()  { printf "%s   %s%s\n" "$C_DIM" "$1" "$C_RST"; }
 SKIP_MODEL=0
 SKIP_SMOKE=0
 AUTO_START="none"
+IDLE_STOP_MINUTES=5
 i=1
 while [ $i -le $# ]; do
   arg="${!i}"
@@ -72,8 +81,13 @@ while [ $i -le $# ]; do
         none|wrapper|launchd) ;;
         *) fail "--auto-start must be one of: none, wrapper, launchd (got: $AUTO_START)" ;;
       esac ;;
+    --idle-stop-minutes)
+      i=$((i+1)); IDLE_STOP_MINUTES="${!i:-}"
+      [[ "$IDLE_STOP_MINUTES" =~ ^[0-9]+$ ]] \
+        || fail "--idle-stop-minutes must be a non-negative integer (got: $IDLE_STOP_MINUTES)"
+      ;;
     -h|--help)
-      sed -n '2,28p' "$0"
+      sed -n '2,32p' "$0"
       exit 0 ;;
     *) fail "unknown arg: $arg" ;;
   esac
@@ -223,18 +237,27 @@ case "$AUTO_START" in
     note "Manual mode — start with ./pocs/01-mlx-lm/serve.sh, stop with Ctrl-C."
     ;;
   wrapper)
-    mkdir -p "$USER_BIN_DIR"
-    for cmd in mlxlm-start mlxlm-stop pi-local; do
+    mkdir -p "$USER_BIN_DIR" "$HOME/.pi"
+    for cmd in mlxlm-start mlxlm-stop mlxlm-idle-watcher pi-local; do
       ln -sf "$REPO_ROOT/bin/$cmd" "$USER_BIN_DIR/$cmd"
     done
-    ok "Installed mlxlm-start, mlxlm-stop, pi-local into $USER_BIN_DIR"
+    cat > "$HOME/.pi/ailocal.conf" <<EOF
+# ailocal config — sourced by mlxlm-start. Edit to retune.
+MLXLM_IDLE_SECONDS=$((IDLE_STOP_MINUTES * 60))
+EOF
+    ok "Installed mlxlm-start, mlxlm-stop, mlxlm-idle-watcher, pi-local into $USER_BIN_DIR"
+    if [ "$IDLE_STOP_MINUTES" -gt 0 ]; then
+      ok "Idle-stop: server will shut down after $IDLE_STOP_MINUTES min of no requests"
+    else
+      warn "Idle-stop disabled (--idle-stop-minutes 0); use mlxlm-stop to free RAM"
+    fi
     case ":$PATH:" in
       *":$USER_BIN_DIR:"*) : ;;
       *) warn "$USER_BIN_DIR is not on your PATH"
          note "Add to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
     esac
     note "Run 'pi-local …' to use pi against Qwen3.6 (auto-starts server on first call)."
-    note "Run 'mlxlm-stop' to free the ~33 GB when you're done."
+    note "Run 'mlxlm-stop' to free the ~33 GB explicitly. Edit ~/.pi/ailocal.conf to retune."
     ;;
   launchd)
     mkdir -p "$USER_BIN_DIR" "$(dirname "$LAUNCH_AGENT_PLIST")"
@@ -252,7 +275,10 @@ case "$AUTO_START" in
     <string>${REPO_ROOT}/bin/mlxlm-start</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>MLXLM_FOREGROUND</key><string>1</string></dict>
+  <dict>
+    <key>MLXLM_FOREGROUND</key><string>1</string>
+    <key>MLXLM_IDLE_SECONDS</key><string>0</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${HOME}/Library/Logs/mlxlm.out.log</string>

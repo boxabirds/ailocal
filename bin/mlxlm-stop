@@ -5,8 +5,18 @@
 set -uo pipefail
 
 PID_FILE="$HOME/.pi/mlxlm.pid"
+WATCHER_PID_FILE="$HOME/.pi/mlxlm-watcher.pid"
 PORT=8080
 killed=0
+
+# Stop the idle watcher first so it doesn't react while we kill the server.
+if [ -f "$WATCHER_PID_FILE" ]; then
+  WPID=$(cat "$WATCHER_PID_FILE" 2>/dev/null || echo "")
+  if [ -n "$WPID" ] && kill -0 "$WPID" 2>/dev/null; then
+    kill "$WPID" 2>/dev/null || true
+  fi
+  rm -f "$WATCHER_PID_FILE"
+fi
 
 if [ -f "$PID_FILE" ]; then
   PID=$(cat "$PID_FILE")

@@ -18,17 +18,49 @@ PID_FILE="$HOME/.pi/mlxlm.pid"
 HEALTH_URL="http://127.0.0.1:8080/v1/models"
 WAIT_SECS=60
 
-# Foreground mode for launchd: just exec serve.sh
+# Idle-stop config: env var > config file > default 300s. Set 0 to disable.
+CONFIG_FILE="$HOME/.pi/ailocal.conf"
+if [ -z "${MLXLM_IDLE_SECONDS:-}" ] && [ -f "$CONFIG_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG_FILE"
+fi
+IDLE_SECONDS="${MLXLM_IDLE_SECONDS:-300}"
+
+# Foreground mode for launchd: just exec serve.sh (no watcher; launchd
+# manages KeepAlive and would just respawn after the watcher killed it).
 if [ "${MLXLM_FOREGROUND:-0}" = "1" ]; then
   exec "$SERVE_SCRIPT"
 fi
+
+spawn_idle_watcher() {
+  if [ "$IDLE_SECONDS" -le 0 ]; then return; fi
+  WATCHER_SCRIPT="$SELF_DIR/mlxlm-idle-watcher"
+  [ -x "$WATCHER_SCRIPT" ] || return
+  # Don't double-spawn
+  if [ -f "$HOME/.pi/mlxlm-watcher.pid" ]; then
+    WATCHER_PID=$(cat "$HOME/.pi/mlxlm-watcher.pid" 2>/dev/null || echo "")
+    if [ -n "$WATCHER_PID" ] && kill -0 "$WATCHER_PID" 2>/dev/null; then
+      return
+    fi
+  fi
+  MLXLM_IDLE_SECONDS="$IDLE_SECONDS" nohup "$WATCHER_SCRIPT" \
+    >>"$HOME/Library/Logs/mlxlm-idle-watcher.log" 2>&1 &
+  disown $! 2>/dev/null || true
+  echo "Idle-stop watcher started (will stop mlx-lm after ${IDLE_SECONDS}s of no requests)"
+}
+
+# In already-running case we still want a watcher if none is running.
+ensure_watcher_then_exit() {
+  spawn_idle_watcher
+  exit 0
+}
 
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
 
 # Already running?
 if curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
   echo "mlx-lm already running (health check OK at $HEALTH_URL)"
-  exit 0
+  ensure_watcher_then_exit
 fi
 
 echo "Starting mlx-lm — model loads ~33 GB, takes ~5-10s..."
@@ -41,6 +73,7 @@ disown "$PID" 2>/dev/null || true
 for i in $(seq 1 "$WAIT_SECS"); do
   if curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
     echo "Ready (PID $PID, log: $LOG_FILE)"
+    spawn_idle_watcher
     exit 0
   fi
   sleep 1

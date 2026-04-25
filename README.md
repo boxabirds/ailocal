@@ -38,24 +38,35 @@ pi -p "write hello world in rust"   # in another terminal
 
 You explicitly start and stop. ~33 GB only held while `serve.sh` is running.
 
-### B. Wrapper — `pi-local` starts the server on demand
+### B. Wrapper — `pi-local` starts on demand, idle-stops after 5 min
 
 ```bash
 ./install.sh --auto-start wrapper
-# Adds to ~/.local/bin: pi-local, mlxlm-start, mlxlm-stop
+# Adds to ~/.local/bin: pi-local, mlxlm-start, mlxlm-stop, mlxlm-idle-watcher
+# Writes ~/.pi/ailocal.conf with MLXLM_IDLE_SECONDS=300
 ```
 
 Then from any directory:
 
 ```bash
 pi-local -p "explain this codebase"
-# First call: spawns mlx-lm in the background (~5-10 s model load), then runs pi.
-# Subsequent calls: instant — server is already up.
+# First call:        spawns mlx-lm + idle-watcher (~5-10 s model load), then runs pi.
+# Subsequent calls:  instant — server is already up.
+# After 5 min idle:  watcher polls the access log and kills the server automatically.
+# Next call:         restarts everything from scratch.
 
-mlxlm-stop                          # frees the ~33 GB when you're done
+mlxlm-stop                          # explicit stop — also clears the watcher
 ```
 
-The server keeps running between `pi-local` calls (so you don't pay model-load latency every time) but **does not** auto-stop. You're in charge of `mlxlm-stop`. Closing the terminal does not kill the server (`nohup`'d).
+How the idle-stop works: the watcher polls every 30 s, compares the mlx-lm log file's mtime to "now". Every HTTP request mlx-lm handles writes a line to the log, so the mtime is exactly the last-request timestamp. After `MLXLM_IDLE_SECONDS` of staleness, the watcher kills the server and exits. There's no per-call timer — only one watcher per server, and a long-running interactive `pi-local` REPL keeps the server alive as long as it makes API calls.
+
+Tune it:
+
+```bash
+./install.sh --auto-start wrapper --idle-stop-minutes 15   # change at install
+echo MLXLM_IDLE_SECONDS=900 > ~/.pi/ailocal.conf            # or edit afterwards
+./install.sh --auto-start wrapper --idle-stop-minutes 0    # disable entirely
+```
 
 Optional: `alias pi=pi-local` in your shell rc and plain `pi` becomes auto-start too.
 
@@ -118,10 +129,11 @@ ailocal/
 ├── README.md          # this file
 ├── install.sh         # resilient one-shot installer
 ├── bench.sh           # 3-test agent-loop bench with consistent tok/s
-├── bin/               # symlink targets used by --auto-start wrapper/launchd
-│   ├── mlxlm-start    # spawn the mlx-lm server (idempotent)
-│   ├── mlxlm-stop     # kill the running server
-│   └── pi-local       # `pi` wrapper that auto-starts the server first
+├── bin/                  # symlink targets used by --auto-start wrapper/launchd
+│   ├── mlxlm-start       # spawn the mlx-lm server (idempotent)
+│   ├── mlxlm-stop        # kill the running server (and its idle watcher)
+│   ├── mlxlm-idle-watcher # polls log mtime; kills server after N minutes idle
+│   └── pi-local          # `pi` wrapper that auto-starts the server first
 ├── pocs/              # head-to-head bench of 4 server stacks
 │   ├── README.md
 │   ├── eval/          # shared eval harness (prompts.json, run_eval.sh, configure_pi.sh)

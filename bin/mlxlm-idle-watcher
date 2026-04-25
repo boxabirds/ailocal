@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# mlxlm-idle-watcher — polls mlx-lm's access log mtime; kills the server
+# when no requests have arrived for $MLXLM_IDLE_SECONDS (default 300).
+#
+# Spawned by mlxlm-start. Exits when:
+#   - server PID is gone (someone else stopped it)
+#   - idle threshold reached → kill server, then exit
+#   - SIGTERM received (mlxlm-stop)
+
+set -uo pipefail
+
+readonly LOG_FILE="$HOME/Library/Logs/mlxlm.log"
+readonly SERVER_PID_FILE="$HOME/.pi/mlxlm.pid"
+readonly WATCHER_PID_FILE="$HOME/.pi/mlxlm-watcher.pid"
+readonly IDLE_SECONDS="${MLXLM_IDLE_SECONDS:-300}"
+readonly POLL_SECONDS=30
+
+# If idle threshold is 0, do nothing (caller asked for no idle stop)
+[ "$IDLE_SECONDS" -gt 0 ] || exit 0
+
+mkdir -p "$(dirname "$WATCHER_PID_FILE")"
+echo "$$" > "$WATCHER_PID_FILE"
+trap 'rm -f "$WATCHER_PID_FILE"' EXIT
+
+stat_mtime() {
+  # macOS stat
+  stat -f %m "$1" 2>/dev/null
+}
+
+while true; do
+  sleep "$POLL_SECONDS"
+
+  # Server gone? Watcher's job is done.
+  if [ ! -f "$SERVER_PID_FILE" ]; then exit 0; fi
+  SERVER_PID=$(cat "$SERVER_PID_FILE" 2>/dev/null || echo "")
+  if [ -z "$SERVER_PID" ] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    exit 0
+  fi
+
+  # Log mtime is the proxy for "last request handled". Falls back to launch
+  # time if mlx-lm hasn't logged anything yet (which it does immediately on
+  # boot, so this fallback is just defensive).
+  if [ ! -f "$LOG_FILE" ]; then continue; fi
+  mtime=$(stat_mtime "$LOG_FILE")
+  [ -z "$mtime" ] && continue
+  now=$(date +%s)
+  age=$((now - mtime))
+
+  if [ "$age" -ge "$IDLE_SECONDS" ]; then
+    echo "$(date -u +%FT%TZ) idle ${age}s ≥ ${IDLE_SECONDS}s — stopping mlx-lm" >&2
+    kill "$SERVER_PID" 2>/dev/null || true
+    rm -f "$SERVER_PID_FILE"
+    exit 0
+  fi
+done
