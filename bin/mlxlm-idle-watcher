@@ -27,6 +27,15 @@ stat_mtime() {
   stat -f %m "$1" 2>/dev/null
 }
 
+# Returns 0 if any pi process is currently running. pi.dev's launcher script
+# starts with `#!/usr/bin/env node`, which makes the kernel set argv[0] to "pi"
+# — so `pgrep -x pi` finds it by argv[0] even though `comm` is "node".
+# (Caveat: if you have another binary literally named `pi` on PATH, that
+# would also match. Acceptable for this stack.)
+any_pi_process_running() {
+  pgrep -x pi >/dev/null 2>&1
+}
+
 while true; do
   sleep "$POLL_SECONDS"
 
@@ -36,6 +45,10 @@ while true; do
   if [ -z "$SERVER_PID" ] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
     exit 0
   fi
+
+  # If any pi process is alive, the user is mid-task — don't kill the server
+  # even if no API requests have hit recently (REPL typing, reading output).
+  if any_pi_process_running; then continue; fi
 
   # Log mtime is the proxy for "last request handled". Falls back to launch
   # time if mlx-lm hasn't logged anything yet (which it does immediately on
@@ -47,7 +60,7 @@ while true; do
   age=$((now - mtime))
 
   if [ "$age" -ge "$IDLE_SECONDS" ]; then
-    echo "$(date -u +%FT%TZ) idle ${age}s ≥ ${IDLE_SECONDS}s — stopping mlx-lm" >&2
+    echo "$(date -u +%FT%TZ) idle ${age}s ≥ ${IDLE_SECONDS}s, no pi process — stopping mlx-lm" >&2
     kill "$SERVER_PID" 2>/dev/null || true
     rm -f "$SERVER_PID_FILE"
     exit 0
