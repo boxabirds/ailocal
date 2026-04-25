@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+
+# Eval / bench output
+pocs/*/results/
+bench/results/
+*.log
+
+# Vendored upstream sources (cloned by install scripts)
+pocs/02-vllm-swift/src/
+
+# Editor
+.vscode/
+.idea/
+
+# Local secrets / scratch
+/tmp_*
+*.local

@@ -1,0 +1,29 @@
+[
+  {
+    "id": "test1",
+    "name": "bug_fix_sliding_window",
+    "prompt": "Read sliding_window.py. There's a bug — running it gives [3, 3, 5, 5, 6] but the correct sliding-window-max for k=3 is [3, 3, 5, 5, 6, 7]. Fix it.",
+    "verify": {
+      "command": "python3 sliding_window.py",
+      "expected_substring": "[3, 3, 5, 5, 6, 7]"
+    }
+  },
+  {
+    "id": "test2",
+    "name": "new_file_from_spec",
+    "prompt": "Create a Python CLI tool word_freq.py in the current directory. Spec: reads stdin or a file argument, outputs the top N most common words (default N=10) one per line in 'count<TAB>word' format, lowercase, only [a-z]+ tokens. Use argparse for the file and -n flags. No external dependencies.",
+    "verify": {
+      "command": "echo 'the the the cat dog dog' | python3 word_freq.py -n 2",
+      "expected_substring": "the"
+    }
+  },
+  {
+    "id": "test3",
+    "name": "cross_file_refactor",
+    "prompt": "Refactor: extract format_user_record (and only that function) from utils.py into a new file users.py. Update service.py to import format_user_record from users instead of utils. Leave shout in utils.py. Don't change behavior.",
+    "verify": {
+      "command": "python3 service.py",
+      "expected_substring": "Alice"
+    }
+  }
+]
