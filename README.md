@@ -120,24 +120,38 @@ The repo doesn't manage `~/.config/opencode/opencode.json` for you (your existin
 
 Then `opencode-local --agent qwen-mlxlm` (or `opencode --agent qwen-mlxlm` if you've added the alias).
 
-#### opencode + Exa web search (optional but useful for coding agents)
+#### opencode + Exa web search (optional, free tier available)
 
-opencode ships with built-in Exa-powered web search via a hosted MCP server. With a custom provider like `mlxlm`, the tools aren't exposed by default — opencode gates them behind an env var. Two env vars matter (verified against opencode 1.4.0's source):
+opencode ships with built-in [Exa](https://exa.ai)-powered web search via a hosted MCP server. With a custom provider like `mlxlm` it's hidden by default — opencode only exposes those tools to its own provider unless you opt in. Setup is a one-time shell-rc edit; Exa offers a free tier with a monthly request quota that's enough to try out a coding-agent workflow.
 
-```bash
-# Required to enable the Exa tools when the active provider is custom (not opencode's own).
-# Without this, your agent has no websearch tool even though Exa is bundled.
-export OPENCODE_ENABLE_EXA=true
+Two env vars matter (verified against opencode 1.4.0's bundled source):
 
-# Optional. Without it, opencode hits https://mcp.exa.ai/mcp anonymously
-# (rate-limited, may return errors under load). With it, your key is passed
-# as a query param: https://mcp.exa.ai/mcp?exaApiKey=$EXA_API_KEY
-export EXA_API_KEY="..."
-```
+| Var | Required? | What it does |
+|---|---|---|
+| `OPENCODE_ENABLE_EXA` | **yes**, when using a custom provider like `mlxlm` | Reveals the Exa tools to the agent. Without it, your agent has no websearch tool at all. |
+| `EXA_API_KEY` | optional | Passed as a query param to `mcp.exa.ai/mcp`. Without it, opencode hits the bare endpoint anonymously — sufficient for a quick try, but the free authenticated tier gives you a real per-month quota and clearer rate-limit behaviour. |
 
-Get an Exa API key from your dashboard at [dashboard.exa.ai](https://dashboard.exa.ai/api-keys). The free tier is enough to try it out; paid tiers raise the rate limits and give better recency on the index.
+Steps to enable Exa with a free key:
 
-Add both to `~/.zshrc` (or `~/.bashrc`) so opencode-local inherits them on every launch.
+1. Sign up at [exa.ai](https://exa.ai) and verify your email. Check the current free-tier limits on their pricing page; the per-month request quota is what governs how much agentic searching you can do.
+2. Generate an API key in your Exa dashboard (look for "API Keys" — typically at `dashboard.exa.ai/api-keys`).
+3. Add both vars to your shell rc (`~/.zshrc` for zsh, `~/.bashrc` for bash):
+
+   ```bash
+   export OPENCODE_ENABLE_EXA=true
+   export EXA_API_KEY="exa_..."   # the key from step 2
+   ```
+
+4. Open a new terminal (or `source ~/.zshrc`) and verify:
+
+   ```bash
+   opencode-local run --agent qwen-mlxlm \
+     "Use websearch to find the current Apple MLX version on GitHub. Cite the URL."
+   ```
+
+   If Exa isn't enabled, the agent will say it has no web tools or guess from training data. With Exa wired up, you'll see a `websearch` tool call in the output and a real URL in the answer.
+
+Without `EXA_API_KEY`, anonymous requests still flow to `mcp.exa.ai/mcp`, but rate-limiting is opaque and the connection can fail under any load — fine for one-off tests, not for sustained use.
 
 ### B. Manual — only running when you say so
 
