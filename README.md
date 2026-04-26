@@ -26,25 +26,26 @@ Full breakdown and gotchas: **[pocs/README.md](pocs/README.md)**.
 
 ## Quick start — three ways to run it
 
-`install.sh` always sets up uv + the model + mlx-lm + pi config. The `--auto-start` flag picks how the server lifecycle works.
+`install.sh` (no flags) sets up uv + the model + **mlx-vlm** (vision-capable) + pi config + an opencode wrapper that has Exa websearch and the full opencode tool suite enabled by default. `--auto-start` picks the lifecycle; `--text-only` opts out of vision.
 
 ### A. Wrapper (default) — agent-local commands, idle-stops after 5 min
 
 ```bash
 ./install.sh
+# Defaults: vision ON, Exa websearch ON, tools ON, idle-stop = 5 min.
 # Adds to ~/.local/bin: pi-local, opencode-local, mlxlm-start, mlxlm-stop,
 #                        mlxlm-idle-watcher
 # Writes ~/.pi/ailocal.conf with MLXLM_IDLE_SECONDS=300
 ```
 
-Two agent wrappers ship — both do the same thing for their respective agent: ensure the local mlx-lm server is up, then `exec` the real binary so all the agent's flags pass through unchanged.
+Two agent wrappers ship — both do the same thing for their respective agent: ensure the local server is up, then `exec` the real binary so all the agent's flags pass through unchanged.
 
 ```bash
 pi-local -p "explain this codebase"           # pi.dev against the local model
-opencode-local --agent qwen-mlxlm             # opencode TUI against the local model
+opencode-local                                # opencode TUI, qwen-mlxlm agent, Exa+tools+vision on
 ```
 
-(opencode needs an agent picked because `opencode.json` typically defines several. The `qwen-mlxlm` agent is set up automatically — see "opencode setup" below.)
+(`opencode-local` injects `--agent qwen-mlxlm` if you don't pass one — opencode otherwise defaults to whatever's first in `opencode.json`. Pass `--agent foo` to override; the installer leaves your other agents untouched.)
 
 Lifecycle either way:
 
@@ -97,20 +98,18 @@ opencode-local --agent qwen-mlxlm    # or be explicit
 
 If you don't have opencode yet: `brew install opencode`, then re-run `install.sh` to pick up the patch.
 
-#### Screenshots / vision input — `install.sh --with-vision`
+#### Screenshots / vision input — on by default
 
-By default `install.sh` wires up **mlx-lm** (text only). To send screenshots / images, install with `--with-vision`:
-
-```bash
-./install.sh --with-vision
-```
-
-This swaps the server runtime to **mlx-vlm** instead of mlx-lm — same on-disk Qwen3.6-27B model (the checkpoint already includes the vision tower), but the server now accepts OpenAI-standard `image_url` content parts. It also patches both client configs to declare the model accepts images:
+`./install.sh` (no flags) wires up **mlx-vlm**, so `pi-local` and `opencode-local` accept image attachments out of the box. Same on-disk Qwen3.6-27B model — the checkpoint already includes the vision tower; mlx-lm just ignored it. The installer also patches both client configs:
 
 - `~/.pi/agent/models.json`: `input: ["text", "image"]`
 - `~/.config/opencode/opencode.json` (qwen-mlxlm agent): `attachment: true`, `modalities.input: ["text","image"]`
 
-Cost: ~600 MB of extra disk for `torch + torchvision` (transformers' `Qwen3VLVideoProcessor` hard-imports them even if you only send images), and ~+2 GB peak resident memory while a request with an image is being served.
+Cost: ~600 MB of extra disk for `torch + torchvision` (transformers' `Qwen3VLVideoProcessor` hard-imports them even if you only send images), and ~+2 GB peak resident memory while a request with an image is being served. To skip vision and use text-only `mlx-lm` instead:
+
+```bash
+./install.sh --text-only
+```
 
 Verify it works (the random-token test — proves the vision tower is actually grounded, not just confabulating):
 
@@ -138,50 +137,80 @@ If the response contains the same `$SECRET` you generated, vision is fully wired
 1. **opencode arg ordering** — put the prompt first, then `--file=...`. The `-f /tmp/v.png "prompt"` form has yargs treat the prompt as another file path and you'll get `Error: File not found: <your prompt>`. Annoying, not fatal.
 2. **mlx-vlm issue [#1057](https://github.com/Blaizzy/mlx-vlm/issues/1057)** (open as of 2026-04-26) describes silent vision-tower loss on `qwen3_5_moe` checkpoints — the server returns 200 with plausible-sounding text but the model never saw the image. The empirical test above on the **dense 27B** checkpoint passes, so it isn't affected. If you switch to a 35B-A3B MoE variant (or another `qwen3_5_moe` model), re-run this test before trusting the output.
 
-To switch back to text-only (free up the 600 MB and shave a tiny bit of overhead):
+#### opencode + Exa web search — on by default (anonymous), key optional
 
-```bash
-./install.sh   # without --with-vision; restores mlx-lm + reverts client modalities
-```
-
-#### opencode + Exa web search (optional, free tier available)
-
-opencode ships with built-in [Exa](https://exa.ai)-powered web search via a hosted MCP server. With a custom provider like `mlxlm` it's hidden by default — opencode only exposes those tools to its own provider unless you opt in. Setup is a one-time shell-rc edit; Exa offers a free tier with a monthly request quota that's enough to try out a coding-agent workflow.
+opencode ships with built-in [Exa](https://exa.ai)-powered web search via a hosted MCP server. With a custom provider like `mlxlm` it's hidden unless `OPENCODE_ENABLE_EXA=true` is exported. **`opencode-local` does that for you automatically** — the agent always has the websearch tool. The remaining choice is whether your calls are anonymous or authenticated.
 
 Two env vars matter (verified against opencode 1.4.0's bundled source):
 
-| Var | Required? | What it does |
+| Var | Set by `opencode-local`? | What it does |
 |---|---|---|
-| `OPENCODE_ENABLE_EXA` | **yes**, when using a custom provider like `mlxlm` | Reveals the Exa tools to the agent. Without it, your agent has no websearch tool at all. |
-| `EXA_API_KEY` | optional | Passed as a query param to `mcp.exa.ai/mcp`. Without it, opencode hits the bare endpoint anonymously — sufficient for a quick try, but the free authenticated tier gives you a real per-month quota and clearer rate-limit behaviour. |
+| `OPENCODE_ENABLE_EXA` | **yes, automatically** | Reveals the Exa tools to the agent. |
+| `EXA_API_KEY` | only if you provide one | Passed as a query param to `mcp.exa.ai/mcp`. Without it, opencode hits the endpoint anonymously — works for a quick try but rate-limiting is opaque. With a free key, you get a real per-month quota. |
 
-Steps to enable Exa with a free key:
+To get an authenticated free-tier key (recommended for sustained use):
 
-1. Sign up at [exa.ai](https://exa.ai) and verify your email. Check the current free-tier limits on their pricing page; the per-month request quota is what governs how much agentic searching you can do.
-2. Generate an API key in your Exa dashboard (look for "API Keys" — typically at `dashboard.exa.ai/api-keys`).
-3. Add both vars to your shell rc (`~/.zshrc` for zsh, `~/.bashrc` for bash):
+1. Sign up at [exa.ai](https://exa.ai) and verify your email. Their pricing page shows the current monthly request quota.
+2. Generate an API key in the Exa dashboard ("API Keys" — typically at `dashboard.exa.ai/api-keys`).
+3. Persist it via the installer or by editing the conf file directly:
 
    ```bash
-   export OPENCODE_ENABLE_EXA=true
-   export EXA_API_KEY="exa_..."   # the key from step 2
+   ./install.sh --exa-api-key "exa_..."         # writes EXA_API_KEY into ~/.pi/ailocal.conf
+   # or, if you prefer to edit by hand:
+   #   echo 'EXA_API_KEY="exa_..."' >> ~/.pi/ailocal.conf
    ```
 
-4. Open a new terminal (or `source ~/.zshrc`) and verify:
+   `opencode-local` sources `~/.pi/ailocal.conf` and exports the key into opencode's environment. A shell-env `EXA_API_KEY` (e.g. set in `~/.zshrc`) wins over the conf file — useful if you want different keys in different shells.
+
+4. Verify:
 
    ```bash
-   opencode-local run --agent qwen-mlxlm \
+   opencode-local run \
      "Use websearch to find the current Apple MLX version on GitHub. Cite the URL."
    ```
 
-   If Exa isn't enabled, the agent will say it has no web tools or guess from training data. With Exa wired up, you'll see a `websearch` tool call in the output and a real URL in the answer.
+   You'll see a `websearch` tool call in the output and a real URL in the answer. Without Exa, the agent would say it has no web tools or guess from training data.
 
-Without `EXA_API_KEY`, anonymous requests still flow to `mcp.exa.ai/mcp`, but rate-limiting is opaque and the connection can fail under any load — fine for one-off tests, not for sustained use.
+#### opencode + MCP servers (your own, beyond Exa)
+
+opencode also speaks the MCP protocol natively, so any MCP server (local stdio or remote SSE/HTTP) plugs in without code changes. Two ways to wire one up:
+
+**A. CLI** — opencode ships subcommands for managing MCP entries:
+
+```bash
+opencode mcp add        # interactive: name, command/url, env vars
+opencode mcp list       # what's wired
+opencode mcp auth       # OAuth dance for remote servers that need it
+opencode mcp debug      # tail traffic to/from a server
+```
+
+**B. Edit `~/.config/opencode/opencode.json`** — the same shape the installer already writes for the `mlxlm` provider. Add an `mcp.<name>` block; opencode picks it up on next launch:
+
+```jsonc
+{
+  "mcp": {
+    "linear": {
+      "type": "remote",
+      "url": "https://mcp.linear.app/sse",
+      "enabled": true
+    },
+    "my-local-tool": {
+      "type": "local",
+      "command": ["node", "/path/to/server.js"],
+      "environment": { "API_KEY": "..." },
+      "enabled": true
+    }
+  }
+}
+```
+
+Once an MCP server is wired, its tools appear to the agent the same way the built-in tools do — no change needed to the `qwen-mlxlm` agent block. You can scope which agents see which MCP server via the `mcp` field on an agent if you want to limit tool surface area.
 
 ### B. Manual — only running when you say so
 
 ```bash
 ./install.sh --auto-start none
-./pocs/01-mlx-lm/serve.sh   # in its own terminal — Ctrl-C to stop
+./pocs/05-mlx-vlm/serve.sh   # vision build (default); use 01-mlx-lm/serve.sh if you installed --text-only
 pi -p "write hello world in rust"   # in another terminal
 ```
 
@@ -211,7 +240,7 @@ This is the right mode if you use pi every day and the 33 GB resident cost is fi
 
 ### What the installer does (any mode)
 
-prereq checks (Apple Silicon, RAM ≥ 32 GB, disk ≥ 50 GB free, Xcode CLT) → `uv` → HuggingFace token + scope verify → download `unsloth/Qwen3.6-27B-MLX-8bit` (~33 GB, resumable) → uv venv with `mlx-lm` → write `~/.pi/agent/{models,settings}.json` → optional smoke test. Idempotent.
+prereq checks (Apple Silicon, RAM ≥ 32 GB, disk ≥ 50 GB free, Xcode CLT) → `uv` → HuggingFace token + scope verify → download `unsloth/Qwen3.6-27B-MLX-8bit` (~33 GB, resumable) → uv venv with `mlx-vlm` (or `mlx-lm` for `--text-only`) → write `~/.pi/agent/{models,settings}.json` → patch `~/.config/opencode/opencode.json` (provider + agent + image modalities) → write `~/.pi/ailocal.conf` (idle-stop window, default agent, optional `EXA_API_KEY`) → optional smoke test. Idempotent.
 
 ## Reference results — M5 Max 128 GB, macOS 26.4, mlx-lm 0.31.3
 

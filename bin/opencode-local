@@ -45,13 +45,26 @@ if ! curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
   "$REAL_DIR/mlxlm-start" >&2 || exit 1
 fi
 
-# Inject default --agent if the user didn't pass one. The agent name is
-# overridable via OPENCODE_DEFAULT_AGENT in ~/.pi/ailocal.conf or env.
+# Source ailocal.conf (default agent, EXA_API_KEY, etc).
 CONFIG_FILE="$HOME/.pi/ailocal.conf"
-if [ -z "${OPENCODE_DEFAULT_AGENT:-}" ] && [ -f "$CONFIG_FILE" ]; then
+if [ -f "$CONFIG_FILE" ]; then
   # shellcheck disable=SC1090
   . "$CONFIG_FILE"
 fi
+
+# Reveal Exa websearch tools to the agent. opencode only exposes Exa to its
+# own provider unless this is set; for our custom mlxlm provider it's required.
+# Caller env wins if already set.
+export OPENCODE_ENABLE_EXA="${OPENCODE_ENABLE_EXA:-true}"
+
+# Pass-through Exa key from env or ~/.pi/ailocal.conf (sourced above). Optional
+# — without it, opencode hits mcp.exa.ai/mcp anonymously (rate-limited).
+if [ -n "${EXA_API_KEY:-}" ]; then
+  export EXA_API_KEY
+fi
+
+# Inject default --agent if the user didn't pass one. Overridable via
+# OPENCODE_DEFAULT_AGENT in ailocal.conf or env.
 DEFAULT_AGENT="${OPENCODE_DEFAULT_AGENT:-qwen-mlxlm}"
 
 user_passed_agent=0

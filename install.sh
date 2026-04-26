@@ -14,16 +14,22 @@
 #   - Smoke test: starts the server, hits /v1/models, kills server
 #
 # Usage: ./install.sh [--skip-model] [--skip-smoke] [--auto-start MODE]
-#                     [--idle-stop-minutes N] [--with-vision]
+#                     [--idle-stop-minutes N] [--text-only] [--exa-api-key KEY]
 #
-# --auto-start MODE controls how mlx-lm starts up:
+# Defaults (no flags): vision-capable server (mlx-vlm) + opencode-local that
+# auto-exports OPENCODE_ENABLE_EXA=true. So plain `opencode-local` gives you:
+#   - Qwen3.6 with image input working out of the box
+#   - Exa websearch tool already revealed to the agent (MCP add-ons via opencode.json)
+#   - opencode's full default tool suite (read/write/bash/etc — nothing disabled)
+#
+# --auto-start MODE controls how the server starts up:
 #   wrapper  (default) — installs `pi-local` (and `mlxlm-start`/`mlxlm-stop`)
 #                         into ~/.local/bin. `pi-local` starts the server on
 #                         demand if it isn't running, then runs pi normally.
 #                         An idle-stop watcher kills the server after N minutes
 #                         of no requests (default 5; --idle-stop-minutes 0 to
 #                         disable). You can also stop manually: `mlxlm-stop`.
-#   none               — you start it yourself: ./pocs/01-mlx-lm/serve.sh
+#   none               — you start it yourself: ./pocs/05-mlx-vlm/serve.sh
 #   launchd            — installs ~/Library/LaunchAgents/com.ailocal.mlxlm.plist
 #                         and loads it. Server starts at login, restarts on
 #                         crash, and holds ~33 GB until you `launchctl unload`.
@@ -33,12 +39,15 @@
 # --idle-stop-minutes N
 #   Wrapper-mode only. Default 5. Set to 0 to disable.
 #
-# --with-vision
-#   Use mlx-vlm (instead of mlx-lm) so the server accepts image_url content
-#   parts. Same on-disk model is reused. Adds ~600 MB to the venv (torch +
-#   torchvision are hard-required by transformers' Qwen3VLVideoProcessor).
-#   Also patches pi.dev models.json and opencode.json so both clients know
-#   the model accepts images.
+# --text-only
+#   Opt out of vision: use mlx-lm (text-only) instead of mlx-vlm. Skips the
+#   ~600 MB torch + torchvision dependency. The on-disk model is the same;
+#   you can flip back any time with a re-run.
+#
+# --exa-api-key KEY
+#   Persist your Exa API key into ~/.pi/ailocal.conf so opencode-local can
+#   pass it through automatically. Get a free key at https://exa.ai. Without
+#   a key, opencode-local still enables Exa but anonymously (rate-limited).
 
 set -uo pipefail
 
@@ -76,14 +85,20 @@ SKIP_MODEL=0
 SKIP_SMOKE=0
 AUTO_START="wrapper"
 IDLE_STOP_MINUTES=5
-WITH_VISION=0
+WITH_VISION=1
+EXA_API_KEY_ARG=""
 i=1
 while [ $i -le $# ]; do
   arg="${!i}"
   case "$arg" in
     --skip-model) SKIP_MODEL=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
-    --with-vision) WITH_VISION=1 ;;
+    --text-only)  WITH_VISION=0 ;;
+    --with-vision) WITH_VISION=1 ;;  # back-compat: now redundant (default)
+    --exa-api-key)
+      i=$((i+1)); EXA_API_KEY_ARG="${!i:-}"
+      [ -n "$EXA_API_KEY_ARG" ] || fail "--exa-api-key requires a value"
+      ;;
     --auto-start)
       i=$((i+1)); AUTO_START="${!i:-}"
       case "$AUTO_START" in
@@ -96,7 +111,7 @@ while [ $i -le $# ]; do
         || fail "--idle-stop-minutes must be a non-negative integer (got: $IDLE_STOP_MINUTES)"
       ;;
     -h|--help)
-      sed -n '2,40p' "$0"
+      sed -n '2,45p' "$0"
       exit 0 ;;
     *) fail "unknown arg: $arg" ;;
   esac
@@ -326,11 +341,28 @@ case "$AUTO_START" in
     for cmd in mlxlm-start mlxlm-stop mlxlm-idle-watcher pi-local opencode-local; do
       ln -sf "$REPO_ROOT/bin/$cmd" "$USER_BIN_DIR/$cmd"
     done
+    # Preserve an existing EXA_API_KEY in the conf if the user already set one
+    # there and didn't pass --exa-api-key on this re-run.
+    EXA_KEY_TO_WRITE="$EXA_API_KEY_ARG"
+    if [ -z "$EXA_KEY_TO_WRITE" ] && [ -f "$HOME/.pi/ailocal.conf" ]; then
+      # Source in a subshell so we read the value the same way the wrappers do
+      # — and don't pollute this shell's env.
+      EXA_KEY_TO_WRITE=$(
+        # shellcheck disable=SC1090
+        . "$HOME/.pi/ailocal.conf" 2>/dev/null
+        printf '%s' "${EXA_API_KEY:-}"
+      )
+    fi
     cat > "$HOME/.pi/ailocal.conf" <<EOF
 # ailocal config — sourced by mlxlm-start and opencode-local. Edit to retune.
 MLXLM_IDLE_SECONDS=$((IDLE_STOP_MINUTES * 60))
 OPENCODE_DEFAULT_AGENT=qwen-mlxlm
 AILOCAL_SERVE_SCRIPT="$POC_DIR/serve.sh"
+# Exa websearch (https://exa.ai). opencode-local auto-exports
+# OPENCODE_ENABLE_EXA=true; setting EXA_API_KEY here makes calls authenticated
+# (free tier — sign up at exa.ai for a per-month quota). Leave empty for
+# anonymous fallback (rate-limited, fine for one-off tests).
+EXA_API_KEY="$EXA_KEY_TO_WRITE"
 EOF
     ok "Installed mlxlm-start, mlxlm-stop, mlxlm-idle-watcher, pi-local, opencode-local into $USER_BIN_DIR"
     if [ "$IDLE_STOP_MINUTES" -gt 0 ]; then
@@ -438,11 +470,14 @@ EOF
 
 To use it (wrapper mode):
   ${C_DIM}\$${C_RST} pi-local -p "write hello world in rust"
-  ${C_DIM}\$${C_RST} opencode-local --agent qwen-mlxlm
+  ${C_DIM}\$${C_RST} opencode-local
         — both auto-start the server on first use (model loads ~5-10s)
         — server keeps running while you use either tool
         — idle watcher stops it after ${IDLE_STOP_MINUTES} min of no agent process + no requests
         — ${C_DIM}\$${C_RST} mlxlm-stop  → kills the server now, frees ~33 GB
+
+  opencode-local defaults: vision $([ "$WITH_VISION" = "1" ] && echo "ON (image attachments work)" || echo "OFF (--text-only)") · tools ON · Exa websearch ON
+  ${C_DIM}EXA_API_KEY: $([ -n "${EXA_KEY_TO_WRITE:-}" ] && echo "set in ~/.pi/ailocal.conf (authenticated free tier)" || echo "not set — anonymous fallback (rate-limited). Add with: ./install.sh --exa-api-key exa_… or edit ~/.pi/ailocal.conf")${C_RST}
 
   Optional aliases (in ~/.zshrc or ~/.bashrc):
     alias pi=pi-local
