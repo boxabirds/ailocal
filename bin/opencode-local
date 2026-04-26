@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# opencode-local — wrapper that ensures mlx-lm is running, then runs opencode.
+#
+# - If the local mlx-lm endpoint is already healthy, runs opencode immediately.
+# - If not, starts the server (~5-10s model load) and waits before running it.
+# - Server stays up after this command exits — use `mlxlm-stop` to free RAM.
+#   The idle watcher also keeps it alive while any opencode process is running.
+#
+# Pair with the qwen-mlxlm agent in your opencode config:
+#   opencode-local --agent qwen-mlxlm
+#
+# This is a separate command from `opencode` so you can still call `opencode`
+# directly (e.g. against a non-local provider) without forcing local startup.
+#
+# Add to your shell rc if you want this to be the default:
+#   alias opencode=opencode-local
+
+set -uo pipefail
+
+INVOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+REAL_DIR="$(cd "$(dirname "$SELF_PATH")" && pwd)"
+HEALTH_URL="http://127.0.0.1:8080/v1/models"
+
+# Locate the real opencode binary, skipping anything in our own dirs (avoids
+# self-recursion if the user has aliased or symlinked opencode -> opencode-local).
+REAL_OPENCODE=""
+IFS=":" read -ra paths <<<"$PATH"
+for d in "${paths[@]}"; do
+  [ -x "$d/opencode" ] || continue
+  cand_dir="$(cd "$d" && pwd)"
+  [ "$cand_dir" = "$INVOKE_DIR" ] && continue
+  [ "$cand_dir" = "$REAL_DIR" ] && continue
+  REAL_OPENCODE="$d/opencode"
+  break
+done
+if [ -z "$REAL_OPENCODE" ]; then
+  echo "opencode-local: cannot find real 'opencode' binary on PATH (excluding $INVOKE_DIR, $REAL_DIR)" >&2
+  exit 127
+fi
+
+# Health check; start server if needed.
+if ! curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
+  echo "opencode-local: mlx-lm not responding — starting it…" >&2
+  "$REAL_DIR/mlxlm-start" >&2 || exit 1
+fi
+
+exec "$REAL_OPENCODE" "$@"

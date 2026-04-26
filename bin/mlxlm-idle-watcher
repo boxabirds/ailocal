@@ -14,6 +14,9 @@ readonly SERVER_PID_FILE="$HOME/.pi/mlxlm.pid"
 readonly WATCHER_PID_FILE="$HOME/.pi/mlxlm-watcher.pid"
 readonly IDLE_SECONDS="${MLXLM_IDLE_SECONDS:-300}"
 readonly POLL_SECONDS=30
+# Agent processes whose presence keeps the server alive. Each must match
+# argv[0] exactly (pgrep -x). Add new agents here when wiring them up.
+readonly AGENT_PROCESSES=(pi opencode)
 
 # If idle threshold is 0, do nothing (caller asked for no idle stop)
 [ "$IDLE_SECONDS" -gt 0 ] || exit 0
@@ -27,13 +30,18 @@ stat_mtime() {
   stat -f %m "$1" 2>/dev/null
 }
 
-# Returns 0 if any pi process is currently running. pi.dev's launcher script
-# starts with `#!/usr/bin/env node`, which makes the kernel set argv[0] to "pi"
-# — so `pgrep -x pi` finds it by argv[0] even though `comm` is "node".
-# (Caveat: if you have another binary literally named `pi` on PATH, that
-# would also match. Acceptable for this stack.)
-any_pi_process_running() {
-  pgrep -x pi >/dev/null 2>&1
+# Returns 0 if any agent listed in AGENT_PROCESSES is currently running.
+# Matches by argv[0] exactly (pgrep -x). pi.dev's launcher uses
+# `#!/usr/bin/env node` which makes the kernel set argv[0] to "pi" even
+# though `comm` is "node"; opencode is a Go binary whose argv[0] is
+# "opencode". (Caveat: an unrelated binary named identically would also
+# match. Acceptable for this stack.)
+any_agent_process_running() {
+  local name
+  for name in "${AGENT_PROCESSES[@]}"; do
+    if pgrep -x "$name" >/dev/null 2>&1; then return 0; fi
+  done
+  return 1
 }
 
 while true; do
@@ -46,9 +54,10 @@ while true; do
     exit 0
   fi
 
-  # If any pi process is alive, the user is mid-task — don't kill the server
-  # even if no API requests have hit recently (REPL typing, reading output).
-  if any_pi_process_running; then continue; fi
+  # If any tracked agent (pi, opencode, …) is alive, the user is mid-task —
+  # don't kill the server even if no API requests have hit recently
+  # (REPL typing, reading output).
+  if any_agent_process_running; then continue; fi
 
   # Log mtime is the proxy for "last request handled". Falls back to launch
   # time if mlx-lm hasn't logged anything yet (which it does immediately on
@@ -60,7 +69,7 @@ while true; do
   age=$((now - mtime))
 
   if [ "$age" -ge "$IDLE_SECONDS" ]; then
-    echo "$(date -u +%FT%TZ) idle ${age}s ≥ ${IDLE_SECONDS}s, no pi process — stopping mlx-lm" >&2
+    echo "$(date -u +%FT%TZ) idle ${age}s ≥ ${IDLE_SECONDS}s, no agent process — stopping mlx-lm" >&2
     kill "$SERVER_PID" 2>/dev/null || true
     rm -f "$SERVER_PID_FILE"
     exit 0

@@ -238,14 +238,14 @@ case "$AUTO_START" in
     ;;
   wrapper)
     mkdir -p "$USER_BIN_DIR" "$HOME/.pi"
-    for cmd in mlxlm-start mlxlm-stop mlxlm-idle-watcher pi-local; do
+    for cmd in mlxlm-start mlxlm-stop mlxlm-idle-watcher pi-local opencode-local; do
       ln -sf "$REPO_ROOT/bin/$cmd" "$USER_BIN_DIR/$cmd"
     done
     cat > "$HOME/.pi/ailocal.conf" <<EOF
 # ailocal config — sourced by mlxlm-start. Edit to retune.
 MLXLM_IDLE_SECONDS=$((IDLE_STOP_MINUTES * 60))
 EOF
-    ok "Installed mlxlm-start, mlxlm-stop, mlxlm-idle-watcher, pi-local into $USER_BIN_DIR"
+    ok "Installed mlxlm-start, mlxlm-stop, mlxlm-idle-watcher, pi-local, opencode-local into $USER_BIN_DIR"
     if [ "$IDLE_STOP_MINUTES" -gt 0 ]; then
       ok "Idle-stop: server will shut down after $IDLE_STOP_MINUTES min of no requests"
     else
@@ -256,8 +256,9 @@ EOF
       *) warn "$USER_BIN_DIR is not on your PATH"
          note "Add to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
     esac
-    note "Run 'pi-local …' to use pi against Qwen3.6 (auto-starts server on first call)."
-    note "Run 'mlxlm-stop' to free the ~33 GB explicitly. Edit ~/.pi/ailocal.conf to retune."
+    note "Run 'pi-local …' or 'opencode-local …' to use the local Qwen3.6 server."
+    note "Both auto-start the server on first call. mlxlm-stop frees the ~33 GB."
+    note "Edit ~/.pi/ailocal.conf to retune the idle-stop window."
     ;;
   launchd)
     mkdir -p "$USER_BIN_DIR" "$(dirname "$LAUNCH_AGENT_PLIST")"
@@ -350,12 +351,15 @@ EOF
 
 To use it (wrapper mode):
   ${C_DIM}\$${C_RST} pi-local -p "write hello world in rust"
-        — auto-starts the server on first use (model loads ~5-10s)
-        — server keeps running after pi-local returns
-        — ${C_DIM}\$${C_RST} mlxlm-stop  → kills the server, frees ~33 GB
+  ${C_DIM}\$${C_RST} opencode-local --agent qwen-mlxlm
+        — both auto-start the server on first use (model loads ~5-10s)
+        — server keeps running while you use either tool
+        — idle watcher stops it after ${IDLE_STOP_MINUTES} min of no agent process + no requests
+        — ${C_DIM}\$${C_RST} mlxlm-stop  → kills the server now, frees ~33 GB
 
-  Optional: ${C_DIM}\$${C_RST} echo 'alias pi=pi-local' >> ~/.zshrc   (or ~/.bashrc)
-            then plain ${C_DIM}\`pi\`${C_RST} also auto-starts the server.
+  Optional aliases (in ~/.zshrc or ~/.bashrc):
+    alias pi=pi-local
+    alias opencode=opencode-local
 
   Run the bench: ${C_DIM}\$${C_RST} ./bench.sh   (server must be up; \`pi-local --version\` will start it)
 EOF

@@ -28,36 +28,46 @@ Full breakdown and gotchas: **[pocs/README.md](pocs/README.md)**.
 
 `install.sh` always sets up uv + the model + mlx-lm + pi config. The `--auto-start` flag picks how the server lifecycle works.
 
-### A. Wrapper (default) — `pi-local` starts on demand, idle-stops after 5 min
+### A. Wrapper (default) — agent-local commands, idle-stops after 5 min
 
 ```bash
 ./install.sh
-# Adds to ~/.local/bin: pi-local, mlxlm-start, mlxlm-stop, mlxlm-idle-watcher
+# Adds to ~/.local/bin: pi-local, opencode-local, mlxlm-start, mlxlm-stop,
+#                        mlxlm-idle-watcher
 # Writes ~/.pi/ailocal.conf with MLXLM_IDLE_SECONDS=300
 ```
 
-Then from any directory:
+Two agent wrappers ship — both do the same thing for their respective agent: ensure the local mlx-lm server is up, then `exec` the real binary so all the agent's flags pass through unchanged.
 
 ```bash
-pi-local -p "explain this codebase"
-# First call:        spawns mlx-lm + idle-watcher (~5-10 s model load), then runs pi.
+pi-local -p "explain this codebase"           # pi.dev against the local model
+opencode-local --agent qwen-mlxlm             # opencode TUI against the local model
+```
+
+(opencode needs an agent picked because `opencode.json` typically defines several. The `qwen-mlxlm` agent is set up automatically — see "opencode setup" below.)
+
+Lifecycle either way:
+
+```bash
+# First call:        spawns mlx-lm + idle-watcher (~5-10 s model load).
 # Subsequent calls:  instant — server is already up.
 
-# After you stop using pi:
+# After you stop using either agent:
 #   - watcher polls every 30 s
-#   - skipped while any pi process is alive (REPL still open, long-running call, etc.)
-#   - once no pi is running AND the access log has been idle for 5 min, server is killed
+#   - skipped while any tracked agent (pi, opencode) is alive
+#   - once no agent is running AND the access log has been idle for 5 min,
+#     the server is killed automatically
 mlxlm-stop                          # explicit stop — also clears the watcher
 ```
 
 **How the idle-stop decides:** every 30 s, the watcher asks two questions in order:
 
-1. **Is any pi process running?** (`pgrep -x pi`). pi.dev's launcher uses `#!/usr/bin/env node`, which makes the kernel set `argv[0]` to `pi`, so `pgrep -x pi` finds it cleanly. If yes → skip kill, don't even check the log.
+1. **Is any tracked agent process running?** (`pgrep -x pi` and `pgrep -x opencode`). pi.dev's launcher uses `#!/usr/bin/env node` which makes the kernel set `argv[0]` to `pi`; opencode is a Go binary whose `argv[0]` is `opencode`. Both match cleanly. If any is alive → skip the kill check entirely.
 2. **Has the access log been quiet for `MLXLM_IDLE_SECONDS`?** (file mtime gap; every HTTP request mlx-lm handles writes a line). If yes → kill the server.
 
-This means a long-running `pi` REPL where you're typing/reading (zero API calls for 10 min) does **not** trigger a kill — the server only goes away after pi exits *and* nothing has hit the API for the configured window.
+A long REPL session where you're typing/reading (zero API calls for 10 min) does **not** trigger a kill — the server only goes away after the agent exits *and* nothing has hit the API for the configured window.
 
-**Failure modes are self-healing.** No cooperative state to leak: `pgrep` is a live OS snapshot, log mtime is filesystem-managed, the watcher pid file is `kill -0`-verified before any spawn. If pi crashes, the watcher just stops finding it on the next poll. If the watcher dies, the next `pi-local` call spawns a new one.
+**Failure modes are self-healing.** No cooperative state to leak: `pgrep` is a live OS snapshot, log mtime is filesystem-managed, the watcher pid file is `kill -0`-verified before any spawn. If the agent crashes, the watcher just stops finding it on the next poll. If the watcher dies, the next `*-local` call spawns a new one.
 
 **Tune it:**
 
@@ -67,11 +77,48 @@ echo MLXLM_IDLE_SECONDS=900 > ~/.pi/ailocal.conf           # or edit afterwards
 ./install.sh --idle-stop-minutes 0                         # disable entirely (manual stop only)
 ```
 
-Optional: `alias pi=pi-local` in your shell rc and plain `pi` becomes auto-start too.
+**Optional aliases** (in `~/.zshrc` or `~/.bashrc`) so plain `pi` / `opencode` also auto-start the server:
 
-This is the right mode if `pi` use is bursty and you don't want a 33 GB resident process between sessions.
+```bash
+alias pi=pi-local
+alias opencode=opencode-local
+```
 
-> Caveat: the `pgrep -x pi` gate matches anything whose `argv[0]` is literally `pi`. If you have an unrelated binary on your machine called `pi` (rare), the watcher will treat it as a live pi.dev session and refuse to shut the server down.
+> Caveat: the agent gate matches anything whose `argv[0]` is literally `pi` or `opencode`. If an unrelated binary on your machine has one of those names (rare), the watcher will treat it as a live agent session and refuse to shut the server down.
+
+#### opencode setup
+
+The repo doesn't manage `~/.config/opencode/opencode.json` for you (your existing config is yours). To wire opencode up to the local mlx-lm, add a provider + agent like this:
+
+```json
+{
+  "provider": {
+    "mlxlm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "mlx-lm (local Qwen3.6-27B-MLX-8bit)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "apiKey": "EMPTY"
+      },
+      "models": {
+        "/Users/julian/models/Qwen3.6-27B-MLX-8bit": {
+          "name": "Qwen3.6-27B-MLX-8bit via mlx-lm",
+          "limit": { "context": 262144, "output": 16384 }
+        }
+      }
+    }
+  },
+  "agent": {
+    "qwen-mlxlm": {
+      "description": "Coding agent backed by Qwen3.6-27B-MLX-8bit on mlx-lm",
+      "mode": "primary",
+      "model": "mlxlm//Users/julian/models/Qwen3.6-27B-MLX-8bit"
+    }
+  }
+}
+```
+
+Then `opencode-local --agent qwen-mlxlm` (or `opencode --agent qwen-mlxlm` if you've added the alias).
 
 ### B. Manual — only running when you say so
 
@@ -143,8 +190,9 @@ ailocal/
 ├── bin/                  # symlink targets used by --auto-start wrapper/launchd
 │   ├── mlxlm-start       # spawn the mlx-lm server (idempotent)
 │   ├── mlxlm-stop        # kill the running server (and its idle watcher)
-│   ├── mlxlm-idle-watcher # polls log mtime; kills server after N minutes idle
-│   └── pi-local          # `pi` wrapper that auto-starts the server first
+│   ├── mlxlm-idle-watcher # polls process+log; kills server after N minutes idle
+│   ├── pi-local          # `pi` wrapper that auto-starts the server first
+│   └── opencode-local    # `opencode` wrapper, same auto-start behavior
 ├── pocs/              # head-to-head bench of 4 server stacks
 │   ├── README.md
 │   ├── eval/          # shared eval harness (prompts.json, run_eval.sh, configure_pi.sh)
