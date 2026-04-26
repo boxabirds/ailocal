@@ -45,4 +45,24 @@ if ! curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
   "$REAL_DIR/mlxlm-start" >&2 || exit 1
 fi
 
-exec "$REAL_OPENCODE" "$@"
+# Inject default --agent if the user didn't pass one. The agent name is
+# overridable via OPENCODE_DEFAULT_AGENT in ~/.pi/ailocal.conf or env.
+CONFIG_FILE="$HOME/.pi/ailocal.conf"
+if [ -z "${OPENCODE_DEFAULT_AGENT:-}" ] && [ -f "$CONFIG_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG_FILE"
+fi
+DEFAULT_AGENT="${OPENCODE_DEFAULT_AGENT:-qwen-mlxlm}"
+
+user_passed_agent=0
+for arg in "$@"; do
+  case "$arg" in
+    --agent|--agent=*) user_passed_agent=1; break ;;
+  esac
+done
+
+if [ "$user_passed_agent" = "0" ] && [ -n "$DEFAULT_AGENT" ]; then
+  exec "$REAL_OPENCODE" "$@" --agent "$DEFAULT_AGENT"
+else
+  exec "$REAL_OPENCODE" "$@"
+fi

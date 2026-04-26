@@ -242,8 +242,9 @@ case "$AUTO_START" in
       ln -sf "$REPO_ROOT/bin/$cmd" "$USER_BIN_DIR/$cmd"
     done
     cat > "$HOME/.pi/ailocal.conf" <<EOF
-# ailocal config — sourced by mlxlm-start. Edit to retune.
+# ailocal config — sourced by mlxlm-start and opencode-local. Edit to retune.
 MLXLM_IDLE_SECONDS=$((IDLE_STOP_MINUTES * 60))
+OPENCODE_DEFAULT_AGENT=qwen-mlxlm
 EOF
     ok "Installed mlxlm-start, mlxlm-stop, mlxlm-idle-watcher, pi-local, opencode-local into $USER_BIN_DIR"
     if [ "$IDLE_STOP_MINUTES" -gt 0 ]; then

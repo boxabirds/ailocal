@@ -120,6 +120,25 @@ The repo doesn't manage `~/.config/opencode/opencode.json` for you (your existin
 
 Then `opencode-local --agent qwen-mlxlm` (or `opencode --agent qwen-mlxlm` if you've added the alias).
 
+#### opencode + Exa web search (optional but useful for coding agents)
+
+opencode ships with built-in Exa-powered web search via a hosted MCP server. With a custom provider like `mlxlm`, the tools aren't exposed by default — opencode gates them behind an env var. Two env vars matter (verified against opencode 1.4.0's source):
+
+```bash
+# Required to enable the Exa tools when the active provider is custom (not opencode's own).
+# Without this, your agent has no websearch tool even though Exa is bundled.
+export OPENCODE_ENABLE_EXA=true
+
+# Optional. Without it, opencode hits https://mcp.exa.ai/mcp anonymously
+# (rate-limited, may return errors under load). With it, your key is passed
+# as a query param: https://mcp.exa.ai/mcp?exaApiKey=$EXA_API_KEY
+export EXA_API_KEY="..."
+```
+
+Get an Exa API key from your dashboard at [dashboard.exa.ai](https://dashboard.exa.ai/api-keys). The free tier is enough to try it out; paid tiers raise the rate limits and give better recency on the index.
+
+Add both to `~/.zshrc` (or `~/.bashrc`) so opencode-local inherits them on every launch.
+
 ### B. Manual — only running when you say so
 
 ```bash
