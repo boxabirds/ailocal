@@ -14,7 +14,7 @@
 #   - Smoke test: starts the server, hits /v1/models, kills server
 #
 # Usage: ./install.sh [--skip-model] [--skip-smoke] [--auto-start MODE]
-#                     [--idle-stop-minutes N]
+#                     [--idle-stop-minutes N] [--with-vision]
 #
 # --auto-start MODE controls how mlx-lm starts up:
 #   wrapper  (default) — installs `pi-local` (and `mlxlm-start`/`mlxlm-stop`)
@@ -32,13 +32,20 @@
 #
 # --idle-stop-minutes N
 #   Wrapper-mode only. Default 5. Set to 0 to disable.
+#
+# --with-vision
+#   Use mlx-vlm (instead of mlx-lm) so the server accepts image_url content
+#   parts. Same on-disk model is reused. Adds ~600 MB to the venv (torch +
+#   torchvision are hard-required by transformers' Qwen3VLVideoProcessor).
+#   Also patches pi.dev models.json and opencode.json so both clients know
+#   the model accepts images.
 
 set -uo pipefail
 
 # ---------- Constants ----------
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly POC_DIR="$REPO_ROOT/pocs/01-mlx-lm"
-readonly VENV_DIR="$POC_DIR/.venv"
+readonly TEXT_POC_DIR="$REPO_ROOT/pocs/01-mlx-lm"
+readonly VISION_POC_DIR="$REPO_ROOT/pocs/05-mlx-vlm"
 readonly MODELS_DIR="$HOME/models"
 readonly MODEL_REPO="unsloth/Qwen3.6-27B-MLX-8bit"
 readonly MODEL_LOCAL_DIR="$MODELS_DIR/Qwen3.6-27B-MLX-8bit"
@@ -69,12 +76,14 @@ SKIP_MODEL=0
 SKIP_SMOKE=0
 AUTO_START="wrapper"
 IDLE_STOP_MINUTES=5
+WITH_VISION=0
 i=1
 while [ $i -le $# ]; do
   arg="${!i}"
   case "$arg" in
     --skip-model) SKIP_MODEL=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
+    --with-vision) WITH_VISION=1 ;;
     --auto-start)
       i=$((i+1)); AUTO_START="${!i:-}"
       case "$AUTO_START" in
@@ -87,12 +96,24 @@ while [ $i -le $# ]; do
         || fail "--idle-stop-minutes must be a non-negative integer (got: $IDLE_STOP_MINUTES)"
       ;;
     -h|--help)
-      sed -n '2,32p' "$0"
+      sed -n '2,40p' "$0"
       exit 0 ;;
     *) fail "unknown arg: $arg" ;;
   esac
   i=$((i+1))
 done
+
+# Choose POC + venv based on vision flag
+if [ "$WITH_VISION" = "1" ]; then
+  POC_DIR="$VISION_POC_DIR"
+else
+  POC_DIR="$TEXT_POC_DIR"
+fi
+VENV_DIR="$POC_DIR/.venv"
+
+# Belt-and-braces: ensure all helper scripts are executable. They should be
+# committed +x but a fresh `git clone` on some setups can lose this.
+chmod +x "$REPO_ROOT"/bin/* "$REPO_ROOT"/pocs/*/serve.sh 2>/dev/null || true
 
 # ---------- 1. Prereq checks ----------
 step "Checking prerequisites"
@@ -202,15 +223,25 @@ else
   ok "Model downloaded to $MODEL_LOCAL_DIR"
 fi
 
-# ---------- 5. mlx-lm setup ----------
-step "Setting up mlx-lm in $VENV_DIR"
-if [ ! -d "$VENV_DIR" ]; then
-  uv venv --python 3.12 "$VENV_DIR" || fail "uv venv failed"
+# ---------- 5. Server runtime setup ----------
+if [ "$WITH_VISION" = "1" ]; then
+  step "Setting up mlx-vlm (vision-capable server) in $VENV_DIR"
+  if [ ! -d "$VENV_DIR" ]; then
+    uv venv --python 3.12 "$VENV_DIR" || fail "uv venv failed"
+  fi
+  uv pip install --python "$VENV_DIR/bin/python" --upgrade \
+    mlx-vlm torch torchvision \
+    || fail "mlx-vlm install failed"
+  ok "mlx-vlm: $("$VENV_DIR/bin/python" -c 'import mlx_vlm,importlib.metadata as m; print(m.version("mlx-vlm"))')"
+else
+  step "Setting up mlx-lm (text-only server) in $VENV_DIR"
+  if [ ! -d "$VENV_DIR" ]; then
+    uv venv --python 3.12 "$VENV_DIR" || fail "uv venv failed"
+  fi
+  uv pip install --python "$VENV_DIR/bin/python" --upgrade mlx-lm \
+    || fail "mlx-lm install failed"
+  ok "mlx-lm: $("$VENV_DIR/bin/python" -c 'import mlx_lm,importlib.metadata as m; print(m.version("mlx-lm"))')"
 fi
-# uv pip install is idempotent (will be a no-op if mlx-lm already installed at correct version)
-uv pip install --python "$VENV_DIR/bin/python" --upgrade mlx-lm \
-  || fail "mlx-lm install failed"
-ok "mlx-lm: $("$VENV_DIR/bin/python" -c 'import mlx_lm,importlib.metadata as m; print(m.version("mlx-lm"))')"
 
 # ---------- 6. pi.dev ----------
 step "Checking pi.dev"
@@ -222,13 +253,67 @@ if ! command -v pi >/dev/null 2>&1; then
 fi
 ok "pi.dev $(pi --version 2>&1 | head -1)"
 
-step "Wiring pi.dev to mlx-lm"
+step "Wiring pi.dev to local server"
 mkdir -p "$PI_CONFIG_DIR"
 "$REPO_ROOT/pocs/eval/configure_pi.sh" mlxlm \
   "http://127.0.0.1:${MLX_LM_PORT}/v1" \
   "EMPTY" \
   "$MODEL_LOCAL_DIR" >/dev/null
-ok "pi.dev configured (provider=mlxlm, baseUrl=http://127.0.0.1:${MLX_LM_PORT}/v1)"
+
+# Patch pi.dev input array if vision is on (configure_pi.sh writes ["text"];
+# we add "image" so pi knows to allow image attachments).
+if [ "$WITH_VISION" = "1" ]; then
+  python3 <<PY
+import json, pathlib
+p = pathlib.Path.home()/".pi/agent/models.json"
+cfg = json.loads(p.read_text())
+cfg["providers"]["mlxlm"]["models"][0]["input"] = ["text", "image"]
+p.write_text(json.dumps(cfg, indent=2))
+PY
+fi
+ok "pi.dev configured (provider=mlxlm, baseUrl=http://127.0.0.1:${MLX_LM_PORT}/v1$([ "$WITH_VISION" = "1" ] && echo ", input=text+image"))"
+
+# Patch opencode config (~/.config/opencode/opencode.json) if it exists.
+# We add a `mlxlm` provider + `qwen-mlxlm` agent if missing, and toggle
+# the modalities when --with-vision changes.
+OPENCODE_CFG="$HOME/.config/opencode/opencode.json"
+if command -v opencode >/dev/null 2>&1 && [ -f "$OPENCODE_CFG" ]; then
+  step "Patching opencode config: $OPENCODE_CFG"
+  if [ "$WITH_VISION" = "1" ]; then
+    INPUT_MODALITIES='["text","image"]'; ATTACHMENT='True'
+  else
+    INPUT_MODALITIES='["text"]'; ATTACHMENT='False'
+  fi
+  python3 <<PY
+import json, pathlib
+p = pathlib.Path("$OPENCODE_CFG")
+cfg = json.loads(p.read_text())
+
+prov = cfg.setdefault("provider", {}).setdefault("mlxlm", {})
+prov["npm"] = "@ai-sdk/openai-compatible"
+prov["name"] = "mlx-lm/mlx-vlm (local Qwen3.6-27B-MLX-8bit)"
+prov["options"] = {"baseURL": "http://127.0.0.1:${MLX_LM_PORT}/v1", "apiKey": "EMPTY"}
+m = prov.setdefault("models", {}).setdefault("$MODEL_LOCAL_DIR", {})
+m["name"] = "Qwen3.6-27B-MLX-8bit via mlx-lm"
+m["limit"] = {"context": 262144, "output": 16384}
+m["attachment"] = $ATTACHMENT
+m["modalities"] = {"input": $INPUT_MODALITIES, "output": ["text"]}
+
+agent = cfg.setdefault("agent", {}).setdefault("qwen-mlxlm", {})
+agent["description"] = "Coding agent backed by Qwen3.6-27B-MLX-8bit on mlx-lm" + (" (vision enabled)" if "$WITH_VISION" == "1" else "")
+agent["mode"] = "primary"
+agent["model"] = "mlxlm/$MODEL_LOCAL_DIR"
+
+p.write_text(json.dumps(cfg, indent=2))
+print("opencode patched: provider=mlxlm, agent=qwen-mlxlm, image=" + ("on" if $ATTACHMENT else "off"))
+PY
+  if [ $? -ne 0 ]; then
+    fail "opencode config patch failed — see error above"
+  fi
+  ok "opencode patched"
+else
+  note "opencode not installed or no config — skipping (install with: brew install opencode)"
+fi
 
 # ---------- 7. Auto-start (optional) ----------
 step "Configuring auto-start mode: $AUTO_START"
@@ -245,6 +330,7 @@ case "$AUTO_START" in
 # ailocal config — sourced by mlxlm-start and opencode-local. Edit to retune.
 MLXLM_IDLE_SECONDS=$((IDLE_STOP_MINUTES * 60))
 OPENCODE_DEFAULT_AGENT=qwen-mlxlm
+AILOCAL_SERVE_SCRIPT="$POC_DIR/serve.sh"
 EOF
     ok "Installed mlxlm-start, mlxlm-stop, mlxlm-idle-watcher, pi-local, opencode-local into $USER_BIN_DIR"
     if [ "$IDLE_STOP_MINUTES" -gt 0 ]; then

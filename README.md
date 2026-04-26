@@ -86,39 +86,63 @@ alias opencode=opencode-local
 
 > Caveat: the agent gate matches anything whose `argv[0]` is literally `pi` or `opencode`. If an unrelated binary on your machine has one of those names (rare), the watcher will treat it as a live agent session and refuse to shut the server down.
 
-#### opencode setup
+#### opencode setup (handled automatically)
 
-The repo doesn't manage `~/.config/opencode/opencode.json` for you (your existing config is yours). To wire opencode up to the local mlx-lm, add a provider + agent like this:
+`install.sh` patches `~/.config/opencode/opencode.json` for you if opencode is installed (it merges into your existing config rather than overwriting). It adds a `mlxlm` provider pointing at `127.0.0.1:8080/v1` and a `qwen-mlxlm` agent. After install, just run:
 
-```json
-{
-  "provider": {
-    "mlxlm": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "mlx-lm (local Qwen3.6-27B-MLX-8bit)",
-      "options": {
-        "baseURL": "http://127.0.0.1:8080/v1",
-        "apiKey": "EMPTY"
-      },
-      "models": {
-        "/Users/julian/models/Qwen3.6-27B-MLX-8bit": {
-          "name": "Qwen3.6-27B-MLX-8bit via mlx-lm",
-          "limit": { "context": 262144, "output": 16384 }
-        }
-      }
-    }
-  },
-  "agent": {
-    "qwen-mlxlm": {
-      "description": "Coding agent backed by Qwen3.6-27B-MLX-8bit on mlx-lm",
-      "mode": "primary",
-      "model": "mlxlm//Users/julian/models/Qwen3.6-27B-MLX-8bit"
-    }
-  }
-}
+```bash
+opencode-local                       # default agent is qwen-mlxlm
+opencode-local --agent qwen-mlxlm    # or be explicit
 ```
 
-Then `opencode-local --agent qwen-mlxlm` (or `opencode --agent qwen-mlxlm` if you've added the alias).
+If you don't have opencode yet: `brew install opencode`, then re-run `install.sh` to pick up the patch.
+
+#### Screenshots / vision input — `install.sh --with-vision`
+
+By default `install.sh` wires up **mlx-lm** (text only). To send screenshots / images, install with `--with-vision`:
+
+```bash
+./install.sh --with-vision
+```
+
+This swaps the server runtime to **mlx-vlm** instead of mlx-lm — same on-disk Qwen3.6-27B model (the checkpoint already includes the vision tower), but the server now accepts OpenAI-standard `image_url` content parts. It also patches both client configs to declare the model accepts images:
+
+- `~/.pi/agent/models.json`: `input: ["text", "image"]`
+- `~/.config/opencode/opencode.json` (qwen-mlxlm agent): `attachment: true`, `modalities.input: ["text","image"]`
+
+Cost: ~600 MB of extra disk for `torch + torchvision` (transformers' `Qwen3VLVideoProcessor` hard-imports them even if you only send images), and ~+2 GB peak resident memory while a request with an image is being served.
+
+Verify it works (the random-token test — proves the vision tower is actually grounded, not just confabulating):
+
+```bash
+SECRET=$(python3 -c 'import secrets; print(secrets.token_urlsafe(8))')
+echo "secret in image: $SECRET"
+
+# any python with PIL installed; if you don't have one, the mlx-vlm venv has PIL:
+~/.local/share/uv/venv/bin/python <<EOF || /Users/julian/expts/ailocal/pocs/05-mlx-vlm/.venv/bin/python <<EOF
+from PIL import Image, ImageDraw
+img = Image.new("RGB", (640, 96), "white")
+ImageDraw.Draw(img).text((10, 30), "$SECRET", fill="black")
+img.save("/tmp/v.png")
+EOF
+
+# IMPORTANT: prompt comes BEFORE --file in opencode (yargs variadic-array
+# greed will otherwise eat your prompt as another file path)
+opencode-local run \
+  "Output only the exact text shown in the image, nothing else, no quotes." \
+  --file=/tmp/v.png
+```
+
+If the response contains the same `$SECRET` you generated, vision is fully wired. Two known caveats worth re-running this on your own checkpoint:
+
+1. **opencode arg ordering** — put the prompt first, then `--file=...`. The `-f /tmp/v.png "prompt"` form has yargs treat the prompt as another file path and you'll get `Error: File not found: <your prompt>`. Annoying, not fatal.
+2. **mlx-vlm issue [#1057](https://github.com/Blaizzy/mlx-vlm/issues/1057)** (open as of 2026-04-26) describes silent vision-tower loss on `qwen3_5_moe` checkpoints — the server returns 200 with plausible-sounding text but the model never saw the image. The empirical test above on the **dense 27B** checkpoint passes, so it isn't affected. If you switch to a 35B-A3B MoE variant (or another `qwen3_5_moe` model), re-run this test before trusting the output.
+
+To switch back to text-only (free up the 600 MB and shave a tiny bit of overhead):
+
+```bash
+./install.sh   # without --with-vision; restores mlx-lm + reverts client modalities
+```
 
 #### opencode + Exa web search (optional, free tier available)
 

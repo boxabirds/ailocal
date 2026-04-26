@@ -12,19 +12,20 @@ set -uo pipefail
 SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 SELF_DIR="$(cd "$(dirname "$SELF_PATH")" && pwd)"
 REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
-SERVE_SCRIPT="$REPO_ROOT/pocs/01-mlx-lm/serve.sh"
 LOG_FILE="$HOME/Library/Logs/mlxlm.log"
 PID_FILE="$HOME/.pi/mlxlm.pid"
 HEALTH_URL="http://127.0.0.1:8080/v1/models"
 WAIT_SECS=60
 
-# Idle-stop config: env var > config file > default 300s. Set 0 to disable.
+# Config: env vars > config file > defaults. AILOCAL_SERVE_SCRIPT picks
+# between mlx-lm (text) and mlx-vlm (vision); install.sh writes it.
 CONFIG_FILE="$HOME/.pi/ailocal.conf"
-if [ -z "${MLXLM_IDLE_SECONDS:-}" ] && [ -f "$CONFIG_FILE" ]; then
+if [ -f "$CONFIG_FILE" ]; then
   # shellcheck disable=SC1090
   . "$CONFIG_FILE"
 fi
 IDLE_SECONDS="${MLXLM_IDLE_SECONDS:-300}"
+SERVE_SCRIPT="${AILOCAL_SERVE_SCRIPT:-$REPO_ROOT/pocs/01-mlx-lm/serve.sh}"
 
 # Foreground mode for launchd: just exec serve.sh (no watcher; launchd
 # manages KeepAlive and would just respawn after the watcher killed it).
