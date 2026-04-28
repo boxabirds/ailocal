@@ -39,18 +39,44 @@ if [ -z "$REAL_OPENCODE" ]; then
   exit 127
 fi
 
-# Health check; start server if needed.
-if ! curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
-  echo "opencode-local: mlx-lm not responding — starting it…" >&2
-  "$REAL_DIR/mlxlm-start" >&2 || exit 1
-fi
-
-# Source ailocal.conf (default agent, EXA_API_KEY, etc).
+# Source ailocal.conf (default agent, EXA_API_KEY, AILOCAL_SERVE_SCRIPT, etc).
 CONFIG_FILE="$HOME/.pi/ailocal.conf"
 if [ -f "$CONFIG_FILE" ]; then
   # shellcheck disable=SC1090
   . "$CONFIG_FILE"
 fi
+
+# Determine which agent will be active (CLI override wins; else default).
+ACTIVE_AGENT="${OPENCODE_DEFAULT_AGENT:-qwen-mlxlm}"
+i=1; argv=("$@")
+while [ $i -le ${#argv[@]} ]; do
+  case "${argv[i-1]}" in
+    --agent=*) ACTIVE_AGENT="${argv[i-1]#--agent=}" ;;
+    --agent)   i=$((i+1)); ACTIVE_AGENT="${argv[i-1]:-$ACTIVE_AGENT}" ;;
+  esac
+  i=$((i+1))
+done
+
+# Pick the serve script that matches this agent's runtime. dsv4-mlxlm needs
+# mlx-lm built from PR #1192 (POC 6); other agents use whatever the conf file
+# has (POC 5 mlx-vlm by default, or POC 1 mlx-lm if --text-only at install).
+REPO_ROOT="$(cd "$REAL_DIR/.." && pwd)"
+case "$ACTIVE_AGENT" in
+  dsv4-mlxlm)
+    DSV4_SERVE="$REPO_ROOT/pocs/06-mlx-lm-dsv4/serve.sh"
+    if [ ! -x "$DSV4_SERVE" ]; then
+      echo "opencode-local: dsv4-mlxlm needs $DSV4_SERVE — not found or not executable." >&2
+      echo "  Run install.sh after pulling, or set up POC 6 manually." >&2
+      exit 1
+    fi
+    export AILOCAL_SERVE_SCRIPT="$DSV4_SERVE"
+    ;;
+esac
+
+# Health check; start (or restart with the right runtime) if needed. mlxlm-start
+# detects when the active serve script differs from what we just exported and
+# restarts the server cleanly.
+"$REAL_DIR/mlxlm-start" >&2 || exit 1
 
 # Reveal Exa websearch tools to the agent. opencode only exposes Exa to its
 # own provider unless this is set; for our custom mlxlm provider it's required.
@@ -63,10 +89,9 @@ if [ -n "${EXA_API_KEY:-}" ]; then
   export EXA_API_KEY
 fi
 
-# Inject default --agent if the user didn't pass one. Overridable via
-# OPENCODE_DEFAULT_AGENT in ailocal.conf or env.
-DEFAULT_AGENT="${OPENCODE_DEFAULT_AGENT:-qwen-mlxlm}"
-
+# Inject default --agent if the user didn't pass one (we already computed
+# ACTIVE_AGENT above by parsing argv, so just echo whether it came from
+# the CLI or the default).
 user_passed_agent=0
 for arg in "$@"; do
   case "$arg" in
@@ -74,8 +99,8 @@ for arg in "$@"; do
   esac
 done
 
-if [ "$user_passed_agent" = "0" ] && [ -n "$DEFAULT_AGENT" ]; then
-  exec "$REAL_OPENCODE" "$@" --agent "$DEFAULT_AGENT"
+if [ "$user_passed_agent" = "0" ] && [ -n "$ACTIVE_AGENT" ]; then
+  exec "$REAL_OPENCODE" "$@" --agent "$ACTIVE_AGENT"
 else
   exec "$REAL_OPENCODE" "$@"
 fi

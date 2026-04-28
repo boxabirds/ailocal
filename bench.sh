@@ -25,11 +25,15 @@ readonly TIMEOUT_AGENT_S=360
 LABEL=""
 PHASE="both"
 PROBE_TOKENS="$DEFAULT_PROBE_TOKENS"
+DRIVER="pi"             # pi | opencode
+OC_AGENT=""             # required when DRIVER=opencode
 for ((i=1; i<=$#; i++)); do
   case "${!i}" in
     --label)         i=$((i+1)); LABEL="${!i}" ;;
     --phase)         i=$((i+1)); PHASE="${!i}" ;;
     --probe-tokens)  i=$((i+1)); PROBE_TOKENS="${!i}" ;;
+    --driver)        i=$((i+1)); DRIVER="${!i}" ;;
+    --agent)         i=$((i+1)); OC_AGENT="${!i}" ;;
     -h|--help)
       sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown arg: ${!i}" >&2; exit 1 ;;
@@ -161,10 +165,23 @@ fi
 
 # ---------- Phase B: agent-loop tests ----------
 if [ "$PHASE" = "b" ] || [ "$PHASE" = "both" ]; then
-  step "Phase B — agent-loop tests (3 pi -p tasks, timeout ${TIMEOUT_AGENT_S}s each)"
+  case "$DRIVER" in
+    pi)
+      step "Phase B — agent-loop tests (3 pi -p tasks, timeout ${TIMEOUT_AGENT_S}s each)"
+      EVAL_SCRIPT="$REPO_ROOT/pocs/eval/run_eval.sh"
+      EVAL_ARG2="$LABEL"
+      ;;
+    opencode)
+      [ -n "$OC_AGENT" ] || { echo "ERROR: --driver opencode requires --agent NAME" >&2; exit 2; }
+      step "Phase B — agent-loop tests (3 opencode-local --agent $OC_AGENT tasks, timeout ${TIMEOUT_AGENT_S}s each)"
+      EVAL_SCRIPT="$REPO_ROOT/pocs/eval/run_eval_opencode.sh"
+      EVAL_ARG2="$OC_AGENT"
+      ;;
+    *) echo "ERROR: --driver must be 'pi' or 'opencode' (got $DRIVER)" >&2; exit 2 ;;
+  esac
   AGENT_DIR="$RUN_DIR/agent"
   mkdir -p "$AGENT_DIR"
-  "$REPO_ROOT/pocs/eval/run_eval.sh" "$AGENT_DIR" "$LABEL" "$TIMEOUT_AGENT_S" \
+  "$EVAL_SCRIPT" "$AGENT_DIR" "$EVAL_ARG2" "$TIMEOUT_AGENT_S" \
     > "$AGENT_DIR/run_eval.stdout" 2> "$AGENT_DIR/run_eval.stderr" \
     || true   # individual test failures shouldn't abort bench
 
@@ -186,7 +203,11 @@ PY
   {
     echo "## Phase B — agent-loop tests"
     echo
-    echo "Three real coding tasks via \`pi -p\` against the same target server."
+    if [ "$DRIVER" = "opencode" ]; then
+      echo "Three real coding tasks via \`opencode-local run --agent $OC_AGENT\` against the same target server."
+    else
+      echo "Three real coding tasks via \`pi -p\` against the same target server."
+    fi
     echo
     cat "$AGENT_DIR/summary.md" | sed -n '/^|/p'
     echo

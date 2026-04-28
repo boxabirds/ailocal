@@ -17,15 +17,22 @@ PID_FILE="$HOME/.pi/mlxlm.pid"
 HEALTH_URL="http://127.0.0.1:8080/v1/models"
 WAIT_SECS=60
 
-# Config: env vars > config file > defaults. AILOCAL_SERVE_SCRIPT picks
-# between mlx-lm (text) and mlx-vlm (vision); install.sh writes it.
+# Config precedence: env var > config file > default.
+# AILOCAL_SERVE_SCRIPT picks between mlx-lm (text), mlx-vlm (vision), and
+# mlx-lm + DSV4 PR (POC 6). opencode-local exports it per active agent so a
+# blind `. ailocal.conf` here would clobber that signal.
+ENV_SERVE_SCRIPT="${AILOCAL_SERVE_SCRIPT:-}"
+ENV_IDLE_SECONDS="${MLXLM_IDLE_SECONDS:-}"
 CONFIG_FILE="$HOME/.pi/ailocal.conf"
 if [ -f "$CONFIG_FILE" ]; then
   # shellcheck disable=SC1090
   . "$CONFIG_FILE"
 fi
+[ -n "$ENV_SERVE_SCRIPT" ] && AILOCAL_SERVE_SCRIPT="$ENV_SERVE_SCRIPT"
+[ -n "$ENV_IDLE_SECONDS" ] && MLXLM_IDLE_SECONDS="$ENV_IDLE_SECONDS"
 IDLE_SECONDS="${MLXLM_IDLE_SECONDS:-300}"
 SERVE_SCRIPT="${AILOCAL_SERVE_SCRIPT:-$REPO_ROOT/pocs/01-mlx-lm/serve.sh}"
+ACTIVE_FILE="$HOME/.pi/mlxlm-active-script"
 
 # Foreground mode for launchd: just exec serve.sh (no watcher; launchd
 # manages KeepAlive and would just respawn after the watcher killed it).
@@ -60,14 +67,36 @@ mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
 
 # Already running?
 if curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
-  echo "mlx-lm already running (health check OK at $HEALTH_URL)"
-  ensure_watcher_then_exit
+  # If the active serve script differs from what we want now (e.g. user
+  # switched between qwen-mlxlm and dsv4-mlxlm agents — different runtimes,
+  # different venvs), kill and restart with the right one.
+  CURRENT_ACTIVE=""
+  [ -f "$ACTIVE_FILE" ] && CURRENT_ACTIVE=$(cat "$ACTIVE_FILE")
+  if [ -n "$CURRENT_ACTIVE" ] && [ "$CURRENT_ACTIVE" != "$SERVE_SCRIPT" ]; then
+    echo "Switching mlx-lm runtime: $CURRENT_ACTIVE → $SERVE_SCRIPT"
+    "$SELF_DIR/mlxlm-stop" >/dev/null 2>&1 || true
+    # Wait for port to free; pkill -9 below if needed
+    for i in 1 2 3 4 5; do
+      curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    if curl -fsS -m 1 "$HEALTH_URL" >/dev/null 2>&1; then
+      pkill -9 -f mlx_lm.server 2>/dev/null
+      pkill -9 -f mlx_vlm.server 2>/dev/null
+      sleep 1
+    fi
+    # Fall through to the spawn block below
+  else
+    echo "mlx-lm already running (health check OK at $HEALTH_URL)"
+    ensure_watcher_then_exit
+  fi
 fi
 
-echo "Starting mlx-lm — model loads ~33 GB, takes ~5-10s..."
+echo "Starting mlx-lm via $(basename "$(dirname "$SERVE_SCRIPT")")/serve.sh — first-request weight load can take 30-60 s for big models..."
 nohup "$SERVE_SCRIPT" >>"$LOG_FILE" 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"
+echo "$SERVE_SCRIPT" > "$ACTIVE_FILE"
 disown "$PID" 2>/dev/null || true
 
 # Wait for /v1/models
